@@ -408,7 +408,7 @@ exit /b %errorlevel%
     $ShellDispatchArguments = "-no-remote -new-instance -profile $ShellDispatchProfile -headless $RemoteAgentArguments about:blank"
     $AppExecAliasArguments = "-no-remote -new-instance -profile $AppExecAliasProfile -headless $RemoteAgentArguments about:blank"
     $BackgroundMarker = "winfire-$Nonce"
-    $BackgroundTaskName = "${BackgroundMarker}:-no-remote:-new-instance:-headless:-remote-debugging-port=$RemoteAgentPort:-remote-allow-system-access"
+    $BackgroundTaskName = "${BackgroundMarker}:-no-remote:-new-instance:-headless:-remote-debugging-port=${RemoteAgentPort}:-remote-allow-system-access"
     $Injection = Invoke-DriverJson -Arguments @(
         "inject",
         "--pid", $ContentProcess.ProcessId.ToString(),

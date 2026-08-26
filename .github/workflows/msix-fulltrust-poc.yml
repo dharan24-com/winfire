@@ -30,6 +30,24 @@ jobs:
             scripts
             src
 
+      - name: Validate the PowerShell harness
+        shell: pwsh
+        run: |
+          $Failures = @()
+          Get-ChildItem ./scripts/*.ps1 | ForEach-Object {
+            $Tokens = $null
+            $Errors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$Tokens,
+              [ref]$Errors
+            )
+            $Failures += $Errors
+          }
+          if ($Failures.Count -gt 0) {
+            $Failures | Format-List | Out-String | Write-Error
+          }
+
       - name: Run the content-process proof
         id: poc
         shell: pwsh
