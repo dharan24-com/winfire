@@ -901,6 +901,13 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     const DWORD pid = ParsePid(RequireOption(argc, argv, L"--pid"));
+    if (mode == L"module") {
+      const auto address = FindRemoteModule(
+          pid, RequireOption(argc, argv, L"--module"));
+      std::cout << "{\"found\":" << (address ? "true" : "false")
+                << ",\"address\":" << address << "}\n";
+      return 0;
+    }
     if (mode == L"inspect") {
       PrintSnapshot(InspectProcess(pid, PROCESS_QUERY_LIMITED_INFORMATION |
                                            PROCESS_QUERY_INFORMATION |

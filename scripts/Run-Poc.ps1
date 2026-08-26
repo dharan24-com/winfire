@@ -360,6 +360,13 @@ exit /b %errorlevel%
     if (-not $Verdict.sandbox_token_observed) {
         throw "The selected Firefox content process did not have a restricted low-integrity sandbox token."
     }
+    $PreloadModule = Invoke-DriverJson -Arguments @(
+        "module", "--pid", $ContentProcess.ProcessId.ToString(),
+        "--module", "renderer_payload.dll"
+    ) -EvidenceName "preload-module.json"
+    if (-not $PreloadModule.found) {
+        throw "Firefox did not preload renderer_payload.dll in the selected content process."
+    }
 
     Write-JsonFile -Value (Get-FirefoxProcesses | Select-Object ProcessId, ParentProcessId, CommandLine) -Path (Join-Path $ArtifactRoot "processes-before.json")
     $EscapedArguments = "-no-remote -new-instance -profile $EscapedProfile -headless about:blank"
