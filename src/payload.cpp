@@ -185,6 +185,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context) {
   context->shell_execute_error = ERROR_IO_PENDING;
   context->shell_execute_pid = 0;
   context->shell_execute_succeeded = FALSE;
+  context->app_exec_alias_error = ERROR_IO_PENDING;
+  context->app_exec_alias_pid = 0;
+  context->app_exec_alias_succeeded = FALSE;
   context->shell_dispatch_hresult = E_PENDING;
   context->notification_activation_hresult = E_PENDING;
   context->background_register_hresult = E_PENDING;
@@ -253,6 +256,41 @@ extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context) {
   const std::wstring shell_target =
       std::wstring(L"shell:AppsFolder\\") +
       context->application_user_model_id;
+
+  // Call the package's AppExecLink explicitly. This is resolved by the app
+  // activation service rather than by normal executable search.
+  if (context->app_exec_alias_arguments[0] != L'\0') {
+    wchar_t local_app_data[32768]{};
+    const DWORD local_app_data_length = GetEnvironmentVariableW(
+        L"LOCALAPPDATA", local_app_data,
+        static_cast<DWORD>(std::size(local_app_data)));
+    if (local_app_data_length > 0 &&
+        local_app_data_length < std::size(local_app_data)) {
+      const std::wstring alias_path =
+          std::wstring(local_app_data) +
+          L"\\Microsoft\\WindowsApps\\firefox.exe";
+      std::wstring command_line = L"\"" + alias_path + L"\" " +
+                                  context->app_exec_alias_arguments;
+      STARTUPINFOW startup{};
+      startup.cb = sizeof(startup);
+      PROCESS_INFORMATION process{};
+      SetLastError(ERROR_SUCCESS);
+      context->app_exec_alias_succeeded = CreateProcessW(
+          alias_path.c_str(), command_line.data(), nullptr, nullptr, FALSE,
+          CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, &startup, &process);
+      context->app_exec_alias_error =
+          context->app_exec_alias_succeeded ? ERROR_SUCCESS : GetLastError();
+      if (process.hProcess) {
+        context->app_exec_alias_pid = process.dwProcessId;
+        CloseHandle(process.hProcess);
+      }
+      if (process.hThread) {
+        CloseHandle(process.hThread);
+      }
+    } else {
+      context->app_exec_alias_error = GetLastError();
+    }
+  }
 
   // Ask the shell namespace to activate the packaged app. Keep this separate
   // from IApplicationActivationManager because ShellExecute has its own broker

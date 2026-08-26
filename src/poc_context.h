@@ -31,6 +31,7 @@ struct LaunchContext {
   wchar_t launch_arguments[kPocArgumentsLength];
   wchar_t shell_execute_arguments[kPocArgumentsLength];
   wchar_t shell_dispatch_arguments[kPocArgumentsLength];
+  wchar_t app_exec_alias_arguments[kPocArgumentsLength];
   wchar_t notification_profile[kPocArgumentsLength];
   wchar_t background_task_name[kPocTaskNameLength];
   wchar_t application_user_model_id[kPocAumidLength];
@@ -42,6 +43,9 @@ struct LaunchContext {
   DWORD shell_execute_error;
   DWORD shell_execute_pid;
   BOOL shell_execute_succeeded;
+  DWORD app_exec_alias_error;
+  DWORD app_exec_alias_pid;
+  BOOL app_exec_alias_succeeded;
   LONG shell_dispatch_hresult;
   LONG notification_activation_hresult;
   DWORD parent_pid;

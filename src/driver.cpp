@@ -397,6 +397,7 @@ LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
                              const std::wstring& launch_arguments,
                              const std::wstring& shell_execute_arguments,
                              const std::wstring& shell_dispatch_arguments,
+                             const std::wstring& app_exec_alias_arguments,
                              const std::wstring& notification_profile,
                              const std::wstring& background_task_name,
                              const std::wstring& application_user_model_id) {
@@ -431,6 +432,7 @@ LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
   context.launch_result = -1;
   context.activation_hresult = E_PENDING;
   context.shell_execute_error = ERROR_IO_PENDING;
+  context.app_exec_alias_error = ERROR_IO_PENDING;
   context.shell_dispatch_hresult = E_PENDING;
   context.notification_activation_hresult = E_PENDING;
   context.background_register_hresult = E_PENDING;
@@ -450,6 +452,12 @@ LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
   }
   wcsncpy_s(context.shell_dispatch_arguments,
             shell_dispatch_arguments.c_str(), _TRUNCATE);
+  if (app_exec_alias_arguments.size() >=
+      std::size(context.app_exec_alias_arguments)) {
+    throw std::runtime_error("AppExecAlias argument string is too long");
+  }
+  wcsncpy_s(context.app_exec_alias_arguments,
+            app_exec_alias_arguments.c_str(), _TRUNCATE);
   if (notification_profile.size() >=
       std::size(context.notification_profile)) {
     throw std::runtime_error("notification profile path is too long");
@@ -648,6 +656,7 @@ int wmain(int argc, wchar_t** argv) {
           RequireOption(argc, argv, L"--launch-args"),
           RequireOption(argc, argv, L"--shell-execute-args"),
           RequireOption(argc, argv, L"--shell-dispatch-args"),
+          RequireOption(argc, argv, L"--app-exec-alias-args"),
           RequireOption(argc, argv, L"--notification-profile"),
           RequireOption(argc, argv, L"--background-task-name"),
           RequireOption(argc, argv, L"--aumid"));
@@ -673,6 +682,12 @@ int wmain(int argc, wchar_t** argv) {
                 << ",\"shell_execute_error\":"
                 << context.shell_execute_error
                 << ",\"shell_execute_pid\":" << context.shell_execute_pid
+                << ",\"app_exec_alias_succeeded\":"
+                << (context.app_exec_alias_succeeded ? "true" : "false")
+                << ",\"app_exec_alias_error\":"
+                << context.app_exec_alias_error
+                << ",\"app_exec_alias_pid\":"
+                << context.app_exec_alias_pid
                 << ",\"shell_dispatch_hresult\":"
                 << context.shell_dispatch_hresult
                 << ",\"shell_dispatch_hresult_hex\":\""
