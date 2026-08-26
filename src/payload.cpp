@@ -3,6 +3,7 @@
 #include <appmodel.h>
 #include <roapi.h>
 #include <winrt/Windows.ApplicationModel.h>
+#include <winrt/Windows.Foundation.h>
 #include <winrt/base.h>
 
 #include <algorithm>

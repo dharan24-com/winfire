@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <cstddef>
 #include <cstdint>
 
 constexpr std::uint32_t kPocContextMagic = 0x46545043;
