@@ -52,6 +52,11 @@ $Verdict = [ordered]@{
     notification_activation_success = $false
     notification_activation_hresult = $null
     notification_activation_process_observed = $false
+    parent_injection_access = $false
+    parent_injection_open_error = $null
+    sibling_injection_access = $false
+    sibling_injection_pid = 0
+    sibling_injection_open_error = $null
     background_task_registered = $false
     background_task_registration_hresult = $null
     background_proxy_process_observed = $false
@@ -155,6 +160,11 @@ function Write-Summary {
         "- Notification COM activation succeeded: ``$($Result.notification_activation_success)``",
         "- Notification COM HRESULT: ``$($Result.notification_activation_hresult)``",
         "- Notification COM process observed: ``$($Result.notification_activation_process_observed)``",
+        "- Renderer obtained parent injection access: ``$($Result.parent_injection_access)``",
+        "- Parent OpenProcess error: ``$($Result.parent_injection_open_error)``",
+        "- Renderer obtained sibling injection access: ``$($Result.sibling_injection_access)``",
+        "- Sibling injection PID: ``$($Result.sibling_injection_pid)``",
+        "- Sibling OpenProcess error: ``$($Result.sibling_injection_open_error)``",
         "- Renderer registered package timer: ``$($Result.background_task_registered)``",
         "- Background registration HRESULT: ``$($Result.background_task_registration_hresult)``",
         "- Background-task proxy process observed: ``$($Result.background_proxy_process_observed)``"
@@ -369,6 +379,11 @@ exit /b %errorlevel%
     $Verdict.shell_dispatch_hresult = $Injection.shell_dispatch_hresult_hex
     $Verdict.notification_activation_success = [bool]($Injection.notification_activation_hresult -eq 0)
     $Verdict.notification_activation_hresult = $Injection.notification_activation_hresult_hex
+    $Verdict.parent_injection_access = [bool]$Injection.parent_injection_access
+    $Verdict.parent_injection_open_error = $Injection.parent_injection_open_error
+    $Verdict.sibling_injection_access = [bool]$Injection.sibling_injection_access
+    $Verdict.sibling_injection_pid = $Injection.sibling_injection_pid
+    $Verdict.sibling_injection_open_error = $Injection.sibling_injection_open_error
     $Verdict.background_task_registered = [bool]$Injection.background_registered
     $Verdict.background_task_registration_hresult = $Injection.background_register_hresult_hex
     $LaunchedProcess = $null

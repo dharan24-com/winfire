@@ -44,6 +44,12 @@ struct LaunchContext {
   BOOL shell_execute_succeeded;
   LONG shell_dispatch_hresult;
   LONG notification_activation_hresult;
+  DWORD parent_pid;
+  DWORD parent_injection_open_error;
+  BOOL parent_injection_access;
+  DWORD sibling_injection_pid;
+  DWORD sibling_injection_open_error;
+  BOOL sibling_injection_access;
   LONG background_register_hresult;
   BOOL background_registered;
   TokenSnapshot caller;

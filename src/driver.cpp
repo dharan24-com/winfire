@@ -681,7 +681,18 @@ int wmain(int argc, wchar_t** argv) {
                 << context.notification_activation_hresult
                 << ",\"notification_activation_hresult_hex\":\""
                 << HexHresult(context.notification_activation_hresult)
-                << "\",\"background_task_name\":\""
+                << "\",\"parent_pid\":" << context.parent_pid
+                << ",\"parent_injection_access\":"
+                << (context.parent_injection_access ? "true" : "false")
+                << ",\"parent_injection_open_error\":"
+                << context.parent_injection_open_error
+                << ",\"sibling_injection_pid\":"
+                << context.sibling_injection_pid
+                << ",\"sibling_injection_access\":"
+                << (context.sibling_injection_access ? "true" : "false")
+                << ",\"sibling_injection_open_error\":"
+                << context.sibling_injection_open_error
+                << ",\"background_task_name\":\""
                 << JsonEscape(context.background_task_name)
                 << "\",\"background_registered\":"
                 << (context.background_registered ? "true" : "false")
