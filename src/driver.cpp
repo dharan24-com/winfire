@@ -395,7 +395,8 @@ std::uintptr_t InjectLibrary(HANDLE process, DWORD pid,
 LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
                              const std::wstring& local_dll_path,
                              const std::wstring& launch_arguments,
-                             const std::wstring& background_task_name) {
+                             const std::wstring& background_task_name,
+                             const std::wstring& application_user_model_id) {
   const DWORD access = PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
                        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_OPERATION |
                        PROCESS_VM_READ | PROCESS_VM_WRITE;
@@ -425,6 +426,7 @@ LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
   context.call_hresult = E_PENDING;
   context.extended_error = E_PENDING;
   context.launch_result = -1;
+  context.activation_hresult = E_PENDING;
   context.background_register_hresult = E_PENDING;
   if (launch_arguments.size() >= std::size(context.launch_arguments)) {
     throw std::runtime_error("launch argument string is too long");
@@ -436,6 +438,12 @@ LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
   }
   wcsncpy_s(context.background_task_name, background_task_name.c_str(),
             _TRUNCATE);
+  if (application_user_model_id.size() >=
+      std::size(context.application_user_model_id)) {
+    throw std::runtime_error("application user model ID is too long");
+  }
+  wcsncpy_s(context.application_user_model_id,
+            application_user_model_id.c_str(), _TRUNCATE);
 
   void* remote_context = VirtualAllocEx(
       process.get(), nullptr, sizeof(context), MEM_COMMIT | MEM_RESERVE,
@@ -614,7 +622,8 @@ int wmain(int argc, wchar_t** argv) {
       const auto context = RunInjectedPoc(
           pid, full_dll_path, RequireOption(argc, argv, L"--local-dll"),
           RequireOption(argc, argv, L"--launch-args"),
-          RequireOption(argc, argv, L"--background-task-name"));
+          RequireOption(argc, argv, L"--background-task-name"),
+          RequireOption(argc, argv, L"--aumid"));
 
       std::cout << "{\"target_before\":";
       PrintSnapshot(before);
@@ -627,7 +636,12 @@ int wmain(int argc, wchar_t** argv) {
                 << ",\"extended_error\":" << context.extended_error
                 << ",\"extended_error_hex\":\""
                 << HexHresult(context.extended_error)
-                << "\",\"background_task_name\":\""
+                << "\",\"activation_hresult\":"
+                << context.activation_hresult
+                << ",\"activation_hresult_hex\":\""
+                << HexHresult(context.activation_hresult)
+                << "\",\"activation_pid\":" << context.activation_pid
+                << ",\"background_task_name\":\""
                 << JsonEscape(context.background_task_name)
                 << "\",\"background_registered\":"
                 << (context.background_registered ? "true" : "false")

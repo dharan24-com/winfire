@@ -8,6 +8,7 @@
 constexpr std::uint32_t kPocContextMagic = 0x46545043;
 constexpr std::size_t kPocArgumentsLength = 2048;
 constexpr std::size_t kPocTaskNameLength = 512;
+constexpr std::size_t kPocAumidLength = 512;
 constexpr std::size_t kPocPackageNameLength = 256;
 constexpr std::size_t kPocImagePathLength = 1024;
 constexpr std::size_t kPocCommandLineLength = 4096;
@@ -29,9 +30,12 @@ struct LaunchContext {
   std::uint32_t magic;
   wchar_t launch_arguments[kPocArgumentsLength];
   wchar_t background_task_name[kPocTaskNameLength];
+  wchar_t application_user_model_id[kPocAumidLength];
   LONG call_hresult;
   LONG extended_error;
   std::int32_t launch_result;
+  LONG activation_hresult;
+  DWORD activation_pid;
   LONG background_register_hresult;
   BOOL background_registered;
   TokenSnapshot caller;

