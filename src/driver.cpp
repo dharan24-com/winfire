@@ -731,60 +731,48 @@ LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
   wcsncpy_s(context.application_user_model_id,
             application_user_model_id.c_str(), _TRUNCATE);
 
-  PSECURITY_DESCRIPTOR security_descriptor = nullptr;
-  if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-          L"D:(A;;GA;;;WD)(A;;GA;;;RC)S:(ML;;NW;;;S-1-16-0)",
-          SDDL_REVISION_1, &security_descriptor, nullptr)) {
-    ThrowWindowsError("ConvertStringSecurityDescriptorToSecurityDescriptorW");
-  }
-  SECURITY_ATTRIBUTES security_attributes{};
-  security_attributes.nLength = sizeof(security_attributes);
-  security_attributes.lpSecurityDescriptor = security_descriptor;
-  security_attributes.bInheritHandle = FALSE;
-  ScopedHandle mapping(CreateFileMappingW(
-      INVALID_HANDLE_VALUE, &security_attributes, PAGE_READWRITE, 0,
-      static_cast<DWORD>(sizeof(LaunchContext)), kPocContextMappingName));
-  const DWORD mapping_error = GetLastError();
-  LocalFree(security_descriptor);
-  if (!mapping) {
-    ThrowWindowsError("CreateFileMappingW(context)", mapping_error);
-  }
-  if (mapping_error == ERROR_ALREADY_EXISTS) {
-    throw std::runtime_error("the PoC context mapping already exists");
+  const auto remote_entry = RemoteProcedureAddress(
+      pid, std::wstring(L"renderer_payload.dll"), std::string("RunPoc"));
+  void* remote_context = VirtualAllocEx(
+      process.get(), nullptr, sizeof(context), MEM_COMMIT | MEM_RESERVE,
+      PAGE_READWRITE);
+  if (!remote_context) {
+    ThrowWindowsError("VirtualAllocEx(context)");
   }
 
-  auto* shared_context = static_cast<LaunchContext*>(MapViewOfFile(
-      mapping.get(), FILE_MAP_READ | FILE_MAP_WRITE, 0, 0,
-      sizeof(LaunchContext)));
-  if (!shared_context) {
-    ThrowWindowsError("MapViewOfFile(context)");
+  SIZE_T bytes_written = 0;
+  if (!WriteProcessMemory(process.get(), remote_context, &context,
+                          sizeof(context), &bytes_written) ||
+      bytes_written != sizeof(context)) {
+    ThrowWindowsError("WriteProcessMemory(context)");
   }
-  std::memcpy(shared_context, &context, sizeof(context));
-  MemoryBarrier();
-  InterlockedExchange(&shared_context->state, kPocContextReady);
 
-  bool complete = false;
-  for (int attempt = 0; attempt < 2400; ++attempt) {
-    if (InterlockedCompareExchange(&shared_context->state,
-                                   kPocContextComplete,
-                                   kPocContextComplete) ==
-        kPocContextComplete) {
-      complete = true;
-      break;
-    }
-    Sleep(50);
+  ScopedHandle thread(CreateRemoteThread(
+      process.get(), nullptr, 0,
+      reinterpret_cast<LPTHREAD_START_ROUTINE>(remote_entry), remote_context, 0,
+      nullptr));
+  if (!thread) {
+    ThrowWindowsError("CreateRemoteThread(RunPoc)");
   }
-  if (!complete) {
-    UnmapViewOfFile(shared_context);
+  if (WaitForSingleObject(thread.get(), 120000) != WAIT_OBJECT_0) {
     throw std::runtime_error("timed out waiting for FullTrustProcessLauncher");
   }
 
-  MemoryBarrier();
-  std::memcpy(&context, shared_context, sizeof(context));
-  UnmapViewOfFile(shared_context);
-  if (context.bootstrap_result != ERROR_SUCCESS) {
+  DWORD thread_result = ERROR_GEN_FAILURE;
+  if (!GetExitCodeThread(thread.get(), &thread_result)) {
+    ThrowWindowsError("GetExitCodeThread(RunPoc)");
+  }
+  if (thread_result != ERROR_SUCCESS) {
     throw std::runtime_error("payload rejected its launch context");
   }
+
+  SIZE_T bytes_read = 0;
+  if (!ReadProcessMemory(process.get(), remote_context, &context,
+                         sizeof(context), &bytes_read) ||
+      bytes_read != sizeof(context)) {
+    ThrowWindowsError("ReadProcessMemory(context)");
+  }
+  VirtualFreeEx(process.get(), remote_context, 0, MEM_RELEASE);
 
   if (context.magic != kPocContextMagic) {
     throw std::runtime_error("payload returned a corrupt launch context");

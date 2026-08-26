@@ -438,10 +438,6 @@ extern "C" __declspec(dllexport) void replace_init(void*, void**) {}
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void*) {
   if (reason == DLL_PROCESS_ATTACH) {
     DisableThreadLibraryCalls(instance);
-    HANDLE worker = CreateThread(nullptr, 0, RunMappedPoc, nullptr, 0, nullptr);
-    if (worker) {
-      CloseHandle(worker);
-    }
   }
   return TRUE;
 }
