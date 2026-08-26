@@ -650,9 +650,9 @@ void InjectLibrary(HANDLE process, DWORD pid, const std::wstring& dll_path) {
     ThrowWindowsError("GetExitCodeThread(LoadLibraryW)");
   }
   VirtualFreeEx(process, remote_path, 0, MEM_RELEASE);
-  if (!thread_result) {
-    throw std::runtime_error("LoadLibraryW returned null in the renderer");
-  }
+  // GetExitCodeThread truncates the 64-bit HMODULE returned by LoadLibraryW.
+  // The payload's shared completion state is the authoritative load signal.
+  (void)thread_result;
 }
 
 LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
