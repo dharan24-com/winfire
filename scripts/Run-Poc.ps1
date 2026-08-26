@@ -38,6 +38,11 @@ $Verdict = [ordered]@{
     autoland_pushlog_id = 276768
     taskcluster_repackage_task = "dX7_cQx7RHyrDTlnGpbFeA"
     api_success = $false
+    app_id_api_success = $false
+    app_id_call_hresult = $null
+    app_id_launch_result = $null
+    app_id_extended_error = $null
+    app_id_process_observed = $false
     controlled_arguments_observed = $false
     sandbox_token_observed = $false
     full_trust_token_observed = $false
@@ -173,6 +178,11 @@ function Write-Summary {
         "- Autoland pushlog: ``$($Result.autoland_pushlog_id)``",
         "- Taskcluster MSIX task: ``$($Result.taskcluster_repackage_task)``",
         "- WinRT launch reported success: ``$($Result.api_success)``",
+        "- App-ID WinRT launch reported success: ``$($Result.app_id_api_success)``",
+        "- App-ID WinRT call HRESULT: ``$($Result.app_id_call_hresult)``",
+        "- App-ID WinRT launch result: ``$($Result.app_id_launch_result)``",
+        "- App-ID WinRT extended error: ``$($Result.app_id_extended_error)``",
+        "- App-ID WinRT process observed: ``$($Result.app_id_process_observed)``",
         "- Controlled launch marker observed: ``$($Result.controlled_arguments_observed)``",
         "- Restricted content token observed: ``$($Result.sandbox_token_observed)``",
         "- Full-trust token transition observed: ``$($Result.full_trust_token_observed)``",
@@ -435,6 +445,10 @@ exit /b %errorlevel%
     }
 
     $Verdict.api_success = [bool]($Injection.call_hresult -eq 0 -and $Injection.launch_result -eq 0 -and $Injection.extended_error -eq 0)
+    $Verdict.app_id_api_success = [bool]($Injection.app_id_call_hresult -eq 0 -and $Injection.app_id_launch_result -eq 0 -and $Injection.app_id_extended_error -eq 0)
+    $Verdict.app_id_call_hresult = $Injection.app_id_call_hresult_hex
+    $Verdict.app_id_launch_result = $Injection.app_id_launch_result
+    $Verdict.app_id_extended_error = $Injection.app_id_extended_error_hex
     $Verdict.application_activation_success = [bool]($Injection.activation_hresult -eq 0 -and $Injection.activation_pid -gt 0)
     $Verdict.application_activation_hresult = $Injection.activation_hresult_hex
     $Verdict.application_activation_pid = $Injection.activation_pid
@@ -468,6 +482,22 @@ exit /b %errorlevel%
                 -not $Launched.is_restricted -and
                 $Launched.package_family -eq $InstalledPackage.PackageFamilyName
             )
+        }
+    }
+
+    if (-not $Verdict.api_success -and $Verdict.app_id_api_success) {
+        $LaunchedProcess = Wait-EscapedFirefoxProcess -ProfileMarker $EscapedProfile -Deadline (Get-Date).AddSeconds(45)
+        if ($null -ne $LaunchedProcess) {
+            $Launched = Invoke-DriverJson -Arguments @("inspect", "--pid", $LaunchedProcess.ProcessId.ToString()) -EvidenceName "app-id-launched.json"
+            $AppIdMarkerObserved = [bool]($Launched.command_line -like "*$EscapedProfile*")
+            $AppIdTokenObserved = [bool](
+                $Launched.integrity_rid -ge 8192 -and
+                -not $Launched.is_restricted -and
+                $Launched.package_family -eq $InstalledPackage.PackageFamilyName
+            )
+            $Verdict.app_id_process_observed = [bool]($AppIdMarkerObserved -and $AppIdTokenObserved)
+            $Verdict.controlled_arguments_observed = [bool]($Verdict.controlled_arguments_observed -or $AppIdMarkerObserved)
+            $Verdict.full_trust_token_observed = [bool]($Verdict.full_trust_token_observed -or $AppIdTokenObserved)
         }
     }
 
@@ -624,6 +654,9 @@ exit /b %errorlevel%
     if ($Verdict.id_command_proof) {
         $Verdict.status = "CONFIRMED_ID_CODE_EXECUTION"
         $Verdict.reason = "A restricted Firefox content process caused Windows to launch a marked, unrestricted packaged Firefox process with Remote Agent system access. A privileged chrome-context script in that exact process launched id.exe and captured its successful output."
+    } elseif ($Verdict.app_id_process_observed) {
+        $Verdict.status = "CONFIRMED_APP_ID_FULL_TRUST"
+        $Verdict.reason = "A restricted Firefox content process invoked the App-ID-specific FullTrustProcessLauncher overload. Windows created a marked, package-identical unrestricted Firefox process."
     } elseif ($Verdict.app_exec_alias_process_observed) {
         $Verdict.status = "CONFIRMED_APP_EXEC_ALIAS"
         $Verdict.reason = "A restricted untrusted-integrity Firefox content process invoked the package AppExecLink with controlled arguments. Windows launched a non-restricted packaged Firefox process carrying the unique profile marker."
@@ -651,7 +684,7 @@ exit /b %errorlevel%
     } elseif ($Verdict.background_task_registered) {
         $Verdict.status = "INCONCLUSIVE_BACKGROUND_TIMER"
         $Verdict.reason = "The compromised content process registered the package background timer, but no controlled full-trust launch was observed before the runner deadline."
-    } elseif ($Injection.launch_result -eq 1 -or $Injection.call_hresult_hex -eq "0x80070005" -or $Injection.extended_error_hex -eq "0x80070005") {
+    } elseif ($Injection.launch_result -eq 1 -or $Injection.call_hresult_hex -eq "0x80070005" -or $Injection.extended_error_hex -eq "0x80070005" -or $Injection.app_id_call_hresult_hex -eq "0x80070005" -or $Injection.app_id_extended_error_hex -eq "0x80070005") {
         $Verdict.status = "BLOCKED_BY_WINDOWS"
         $Verdict.reason = "The call originated inside the sandboxed Firefox content process, but Windows returned access denied and no sandbox escape was demonstrated."
     } elseif ($Verdict.api_success) {

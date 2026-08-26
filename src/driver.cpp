@@ -682,6 +682,9 @@ LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
   context.call_hresult = E_PENDING;
   context.extended_error = E_PENDING;
   context.launch_result = -1;
+  context.app_id_call_hresult = E_PENDING;
+  context.app_id_extended_error = E_PENDING;
+  context.app_id_launch_result = -1;
   context.activation_hresult = E_PENDING;
   context.shell_execute_error = ERROR_IO_PENDING;
   context.app_exec_alias_error = ERROR_IO_PENDING;
@@ -939,6 +942,16 @@ int wmain(int argc, wchar_t** argv) {
                 << ",\"extended_error\":" << context.extended_error
                 << ",\"extended_error_hex\":\""
                 << HexHresult(context.extended_error)
+                << "\",\"app_id_call_hresult\":"
+                << context.app_id_call_hresult
+                << ",\"app_id_call_hresult_hex\":\""
+                << HexHresult(context.app_id_call_hresult)
+                << "\",\"app_id_launch_result\":"
+                << context.app_id_launch_result
+                << ",\"app_id_extended_error\":"
+                << context.app_id_extended_error
+                << ",\"app_id_extended_error_hex\":\""
+                << HexHresult(context.app_id_extended_error)
                 << "\",\"activation_hresult\":"
                 << context.activation_hresult
                 << ",\"activation_hresult_hex\":\""

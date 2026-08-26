@@ -230,6 +230,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context) {
   context->call_hresult = E_PENDING;
   context->extended_error = S_OK;
   context->launch_result = -1;
+  context->app_id_call_hresult = E_PENDING;
+  context->app_id_extended_error = S_OK;
+  context->app_id_launch_result = -1;
   context->activation_hresult = E_PENDING;
   context->activation_pid = 0;
   context->shell_execute_error = ERROR_IO_PENDING;
@@ -268,6 +271,32 @@ extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context) {
     context->call_hresult = error.code().value;
   } catch (...) {
     context->call_hresult = E_FAIL;
+  }
+
+  // Exercise the API's separate package-relative application-ID overload.
+  // This reaches a distinct broker entry point and avoids relying on Windows
+  // to infer the current application ID from the renderer token.
+  if (context->application_user_model_id[0] != L'\0') {
+    std::wstring application_id = context->application_user_model_id;
+    const auto separator = application_id.find_last_of(L'!');
+    if (separator != std::wstring::npos && separator + 1 < application_id.size()) {
+      application_id.erase(0, separator + 1);
+      try {
+        const auto result =
+            winrt::Windows::ApplicationModel::FullTrustProcessLauncher::
+                LaunchFullTrustProcessForAppWithArgumentsAsync(
+                    application_id.c_str(), context->launch_arguments)
+                    .get();
+        context->app_id_launch_result =
+            static_cast<std::int32_t>(result.LaunchResult());
+        context->app_id_extended_error = result.ExtendedError().value;
+        context->app_id_call_hresult = S_OK;
+      } catch (const winrt::hresult_error& error) {
+        context->app_id_call_hresult = error.code().value;
+      } catch (...) {
+        context->app_id_call_hresult = E_FAIL;
+      }
+    }
   }
 
   // Exercise the packaged-app activation broker from the same renderer token.
@@ -352,7 +381,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context) {
     info.cbSize = sizeof(info);
     info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
     info.lpVerb = L"open";
-    info.lpFile = L"firefox.exe";
+    info.lpFile = shell_target.c_str();
     info.lpParameters = context->shell_execute_arguments;
     info.nShow = SW_HIDE;
     SetLastError(ERROR_SUCCESS);

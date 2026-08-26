@@ -46,6 +46,9 @@ struct LaunchContext {
   LONG call_hresult;
   LONG extended_error;
   std::int32_t launch_result;
+  LONG app_id_call_hresult;
+  LONG app_id_extended_error;
+  std::int32_t app_id_launch_result;
   LONG activation_hresult;
   DWORD activation_pid;
   DWORD shell_execute_error;
