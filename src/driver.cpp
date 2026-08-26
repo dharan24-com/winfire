@@ -345,6 +345,116 @@ std::uintptr_t FindRemoteModuleByMemoryMap(
   }
 }
 
+bool ReadRemoteBytes(HANDLE process, std::uintptr_t address, void* buffer,
+                     SIZE_T size) {
+  SIZE_T bytes_read = 0;
+  return ReadProcessMemory(process, reinterpret_cast<LPCVOID>(address), buffer,
+                           size, &bytes_read) &&
+         bytes_read == size;
+}
+
+std::uintptr_t FindRemoteModuleInPeb(HANDLE process,
+                                     std::uintptr_t peb_address,
+                                     const std::wstring& module_name) {
+  if (!peb_address) {
+    return 0;
+  }
+
+  // PEB, PEB_LDR_DATA, and LDR_DATA_TABLE_ENTRY are deliberately read by
+  // stable x64 field offsets. This path is used for x64 processes emulated on
+  // ARM64, where Toolhelp and VirtualQueryEx reject cross-machine queries.
+  std::uint64_t loader_address = 0;
+  if (!ReadRemoteBytes(process, peb_address + 0x18, &loader_address,
+                       sizeof(loader_address)) ||
+      !loader_address) {
+    return 0;
+  }
+
+  const std::uintptr_t list_head =
+      static_cast<std::uintptr_t>(loader_address) + 0x10;
+  std::uint64_t current = 0;
+  if (!ReadRemoteBytes(process, list_head, &current, sizeof(current))) {
+    return 0;
+  }
+
+  struct RemoteUnicodeString {
+    USHORT length;
+    USHORT maximum_length;
+    ULONG padding;
+    std::uint64_t buffer;
+  };
+
+  for (int index = 0; index < 512 && current && current != list_head;
+       ++index) {
+    std::uint64_t next = 0;
+    std::uint64_t module_base = 0;
+    RemoteUnicodeString base_name{};
+    if (!ReadRemoteBytes(process, static_cast<std::uintptr_t>(current), &next,
+                         sizeof(next)) ||
+        !ReadRemoteBytes(process, static_cast<std::uintptr_t>(current) + 0x30,
+                         &module_base, sizeof(module_base)) ||
+        !ReadRemoteBytes(process, static_cast<std::uintptr_t>(current) + 0x58,
+                         &base_name, sizeof(base_name))) {
+      return 0;
+    }
+
+    if (base_name.buffer && base_name.length > 0 &&
+        base_name.length <= 32766 &&
+        base_name.length % sizeof(wchar_t) == 0) {
+      std::wstring name(base_name.length / sizeof(wchar_t), L'\0');
+      if (ReadRemoteBytes(process,
+                          static_cast<std::uintptr_t>(base_name.buffer),
+                          name.data(), base_name.length) &&
+          _wcsicmp(name.c_str(), module_name.c_str()) == 0) {
+        return static_cast<std::uintptr_t>(module_base);
+      }
+    }
+    current = next;
+  }
+  return 0;
+}
+
+std::uintptr_t FindRemoteModuleByPeb(DWORD pid,
+                                     const std::wstring& module_name) {
+  ScopedHandle process(OpenProcess(PROCESS_QUERY_INFORMATION |
+                                       PROCESS_QUERY_LIMITED_INFORMATION |
+                                       PROCESS_VM_READ,
+                                   FALSE, pid));
+  if (!process) {
+    ThrowWindowsError("OpenProcess(PEB module scan)");
+  }
+
+  using NtQueryInformationProcessFunction = NTSTATUS(NTAPI*)(
+      HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
+  const auto query = reinterpret_cast<NtQueryInformationProcessFunction>(
+      GetProcAddress(GetModuleHandleW(L"ntdll.dll"),
+                     "NtQueryInformationProcess"));
+  if (!query) {
+    ThrowWindowsError("GetProcAddress(NtQueryInformationProcess)");
+  }
+
+  PROCESS_BASIC_INFORMATION basic{};
+  ULONG returned = 0;
+  if (query(process.get(), ProcessBasicInformation, &basic, sizeof(basic),
+            &returned) >= 0) {
+    const auto found = FindRemoteModuleInPeb(
+        process.get(), reinterpret_cast<std::uintptr_t>(basic.PebBaseAddress),
+        module_name);
+    if (found) {
+      return found;
+    }
+  }
+
+  ULONG_PTR emulated_peb = 0;
+  if (query(process.get(), static_cast<PROCESSINFOCLASS>(26), &emulated_peb,
+            sizeof(emulated_peb), &returned) >= 0 &&
+      emulated_peb) {
+    return FindRemoteModuleInPeb(
+        process.get(), static_cast<std::uintptr_t>(emulated_peb), module_name);
+  }
+  return 0;
+}
+
 std::uintptr_t FindRemoteModule(DWORD pid, const std::wstring& module_name) {
   for (int attempt = 0; attempt < 10; ++attempt) {
     ScopedHandle snapshot(
@@ -355,7 +465,7 @@ std::uintptr_t FindRemoteModule(DWORD pid, const std::wstring& module_name) {
         continue;
       }
       if (error == ERROR_PARTIAL_COPY) {
-        return FindRemoteModuleByMemoryMap(pid, module_name);
+        return FindRemoteModuleByPeb(pid, module_name);
       }
       ThrowWindowsError("CreateToolhelp32Snapshot", error);
     }
@@ -365,7 +475,7 @@ std::uintptr_t FindRemoteModule(DWORD pid, const std::wstring& module_name) {
     if (!Module32FirstW(snapshot.get(), &entry)) {
       const DWORD error = GetLastError();
       if (error == ERROR_PARTIAL_COPY) {
-        return FindRemoteModuleByMemoryMap(pid, module_name);
+        return FindRemoteModuleByPeb(pid, module_name);
       }
       if (error == ERROR_NO_MORE_FILES) {
         return 0;
@@ -377,9 +487,9 @@ std::uintptr_t FindRemoteModule(DWORD pid, const std::wstring& module_name) {
         return reinterpret_cast<std::uintptr_t>(entry.modBaseAddr);
       }
     } while (Module32NextW(snapshot.get(), &entry));
-    return FindRemoteModuleByMemoryMap(pid, module_name);
+    return FindRemoteModuleByPeb(pid, module_name);
   }
-  return FindRemoteModuleByMemoryMap(pid, module_name);
+  return FindRemoteModuleByPeb(pid, module_name);
 }
 
 std::uintptr_t WaitForRemoteModule(DWORD pid,
@@ -427,7 +537,7 @@ std::uintptr_t RemoteProcedureAddress(DWORD pid, const wchar_t* module_name,
           reinterpret_cast<std::uintptr_t>(containing_module));
 }
 
-void InjectLibrary(HANDLE process, const std::wstring& dll_path) {
+void InjectLibrary(HANDLE process, DWORD pid, const std::wstring& dll_path) {
   const SIZE_T path_size = (dll_path.size() + 1) * sizeof(wchar_t);
   void* remote_path = VirtualAllocEx(process, nullptr, path_size,
                                      MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -442,11 +552,8 @@ void InjectLibrary(HANDLE process, const std::wstring& dll_path) {
     ThrowWindowsError("WriteProcessMemory(DLL path)");
   }
 
-  const auto load_library = GetProcAddress(GetModuleHandleW(L"kernel32.dll"),
-                                           "LoadLibraryW");
-  if (!load_library) {
-    ThrowWindowsError("GetProcAddress(LoadLibraryW)");
-  }
+  const auto load_library =
+      RemoteProcedureAddress(pid, L"kernel32.dll", "LoadLibraryW");
   ScopedHandle thread(CreateRemoteThread(
       process, nullptr, 0,
       reinterpret_cast<LPTHREAD_START_ROUTINE>(load_library), remote_path, 0,
@@ -574,7 +681,7 @@ LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
   MemoryBarrier();
   InterlockedExchange(&shared_context->state, kPocContextReady);
 
-  InjectLibrary(process.get(), dll_path);
+  InjectLibrary(process.get(), pid, dll_path);
 
   bool complete = false;
   for (int attempt = 0; attempt < 2400; ++attempt) {
