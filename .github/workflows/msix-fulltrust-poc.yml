@@ -8,6 +8,7 @@ on:
     paths:
       - .github/workflows/msix-fulltrust-poc.yml
       - scripts/Run-Poc.ps1
+      - scripts/Invoke-RemoteIdProof.ps1
       - src/driver.cpp
       - src/payload.cpp
       - src/poc_context.h

