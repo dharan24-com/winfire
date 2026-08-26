@@ -504,37 +504,117 @@ std::uintptr_t WaitForRemoteModule(DWORD pid,
   throw std::runtime_error("injected DLL was not visible in the target process");
 }
 
-std::uintptr_t RemoteProcedureAddress(DWORD pid, const wchar_t* module_name,
-                                      const char* procedure_name) {
-  const auto local_module = GetModuleHandleW(module_name);
-  if (!local_module) {
-    ThrowWindowsError("GetModuleHandleW");
+std::string ReadRemoteAscii(HANDLE process, std::uintptr_t address,
+                            std::size_t maximum_length = 512) {
+  std::string result;
+  result.reserve(maximum_length);
+  for (std::size_t index = 0; index < maximum_length; ++index) {
+    char character = '\0';
+    if (!ReadRemoteBytes(process, address + index, &character,
+                         sizeof(character))) {
+      return {};
+    }
+    if (!character) {
+      return result;
+    }
+    result.push_back(character);
   }
-  const auto local_procedure = GetProcAddress(local_module, procedure_name);
-  if (!local_procedure) {
-    ThrowWindowsError("GetProcAddress");
+  return {};
+}
+
+std::uintptr_t RemoteProcedureAddress(DWORD pid,
+                                      const std::wstring& module_name,
+                                      const std::string& procedure_name,
+                                      int depth = 0) {
+  if (depth > 8) {
+    throw std::runtime_error("remote export forwarder recursion exceeded");
   }
 
-  HMODULE containing_module = nullptr;
-  if (!GetModuleHandleExW(
-          GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-              GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-          reinterpret_cast<LPCWSTR>(local_procedure), &containing_module)) {
-    ThrowWindowsError("GetModuleHandleExW");
+  ScopedHandle process(OpenProcess(PROCESS_QUERY_INFORMATION |
+                                       PROCESS_QUERY_LIMITED_INFORMATION |
+                                       PROCESS_VM_READ,
+                                   FALSE, pid));
+  if (!process) {
+    ThrowWindowsError("OpenProcess(remote export)");
   }
-  wchar_t containing_path[32768]{};
-  if (!GetModuleFileNameW(containing_module, containing_path,
-                          static_cast<DWORD>(std::size(containing_path)))) {
-    ThrowWindowsError("GetModuleFileNameW");
+  const auto module_base = FindRemoteModule(pid, module_name);
+  if (!module_base) {
+    throw std::runtime_error("required module not found in target PEB");
   }
 
-  const auto remote_module = FindRemoteModule(pid, BaseName(containing_path));
-  if (!remote_module) {
-    throw std::runtime_error("required module not found in target process");
+  IMAGE_DOS_HEADER dos{};
+  if (!ReadRemoteBytes(process.get(), module_base, &dos, sizeof(dos)) ||
+      dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew <= 0) {
+    throw std::runtime_error("remote module has an invalid DOS header");
   }
-  return remote_module +
-         (reinterpret_cast<std::uintptr_t>(local_procedure) -
-          reinterpret_cast<std::uintptr_t>(containing_module));
+  IMAGE_NT_HEADERS64 nt{};
+  if (!ReadRemoteBytes(process.get(), module_base + dos.e_lfanew, &nt,
+                       sizeof(nt)) ||
+      nt.Signature != IMAGE_NT_SIGNATURE ||
+      nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+    throw std::runtime_error("remote module has an invalid PE header");
+  }
+
+  const auto& directory =
+      nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+  if (!directory.VirtualAddress || !directory.Size) {
+    throw std::runtime_error("remote module has no export directory");
+  }
+  IMAGE_EXPORT_DIRECTORY exports{};
+  if (!ReadRemoteBytes(process.get(), module_base + directory.VirtualAddress,
+                       &exports, sizeof(exports)) ||
+      !exports.NumberOfNames || !exports.NumberOfFunctions ||
+      exports.NumberOfNames > 65536 || exports.NumberOfFunctions > 65536) {
+    throw std::runtime_error("remote module has an invalid export directory");
+  }
+
+  std::vector<DWORD> name_rvas(exports.NumberOfNames);
+  std::vector<WORD> ordinals(exports.NumberOfNames);
+  std::vector<DWORD> function_rvas(exports.NumberOfFunctions);
+  if (!ReadRemoteBytes(process.get(),
+                       module_base + exports.AddressOfNames,
+                       name_rvas.data(), name_rvas.size() * sizeof(DWORD)) ||
+      !ReadRemoteBytes(process.get(),
+                       module_base + exports.AddressOfNameOrdinals,
+                       ordinals.data(), ordinals.size() * sizeof(WORD)) ||
+      !ReadRemoteBytes(process.get(),
+                       module_base + exports.AddressOfFunctions,
+                       function_rvas.data(),
+                       function_rvas.size() * sizeof(DWORD))) {
+    throw std::runtime_error("could not read the remote export table");
+  }
+
+  for (std::size_t index = 0; index < name_rvas.size(); ++index) {
+    if (ReadRemoteAscii(process.get(), module_base + name_rvas[index]) !=
+        procedure_name) {
+      continue;
+    }
+    const WORD ordinal = ordinals[index];
+    if (ordinal >= function_rvas.size()) {
+      throw std::runtime_error("remote export ordinal is invalid");
+    }
+    const DWORD function_rva = function_rvas[ordinal];
+    if (function_rva >= directory.VirtualAddress &&
+        function_rva < directory.VirtualAddress + directory.Size) {
+      const std::string forwarder =
+          ReadRemoteAscii(process.get(), module_base + function_rva);
+      const auto separator = forwarder.find('.');
+      if (separator == std::string::npos || separator == 0 ||
+          separator + 1 >= forwarder.size() ||
+          forwarder[separator + 1] == '#') {
+        throw std::runtime_error("remote export has an unsupported forwarder");
+      }
+      std::wstring forwarded_module(forwarder.begin(),
+                                    forwarder.begin() + separator);
+      if (forwarded_module.find(L'.') == std::wstring::npos) {
+        forwarded_module += L".dll";
+      }
+      return RemoteProcedureAddress(
+          pid, forwarded_module, forwarder.substr(separator + 1), depth + 1);
+    }
+    return module_base + function_rva;
+  }
+  throw std::runtime_error("procedure not found in remote export table");
 }
 
 void InjectLibrary(HANDLE process, DWORD pid, const std::wstring& dll_path) {
@@ -552,8 +632,8 @@ void InjectLibrary(HANDLE process, DWORD pid, const std::wstring& dll_path) {
     ThrowWindowsError("WriteProcessMemory(DLL path)");
   }
 
-  const auto load_library =
-      RemoteProcedureAddress(pid, L"kernel32.dll", "LoadLibraryW");
+  const auto load_library = RemoteProcedureAddress(
+      pid, std::wstring(L"kernel32.dll"), std::string("LoadLibraryW"));
   ScopedHandle thread(CreateRemoteThread(
       process, nullptr, 0,
       reinterpret_cast<LPTHREAD_START_ROUTINE>(load_library), remote_path, 0,
