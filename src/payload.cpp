@@ -2,6 +2,8 @@
 
 #include <appmodel.h>
 #include <roapi.h>
+#include <shldisp.h>
+#include <shellapi.h>
 #include <shobjidl.h>
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.ApplicationModel.Background.h>
@@ -10,7 +12,12 @@
 
 #include <algorithm>
 #include <iterator>
+#include <string>
 #include <vector>
+
+#ifdef ShellExecute
+#  undef ShellExecute
+#endif
 
 namespace {
 
@@ -91,6 +98,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context) {
   context->launch_result = -1;
   context->activation_hresult = E_PENDING;
   context->activation_pid = 0;
+  context->shell_execute_error = ERROR_IO_PENDING;
+  context->shell_execute_pid = 0;
+  context->shell_execute_succeeded = FALSE;
+  context->shell_dispatch_hresult = E_PENDING;
   context->background_register_hresult = E_PENDING;
   context->background_registered = FALSE;
   CaptureCurrentProcess(context->caller);
@@ -133,6 +144,55 @@ extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context) {
       manager->Release();
     }
     context->activation_hresult = result;
+  }
+
+  const std::wstring shell_target =
+      std::wstring(L"shell:AppsFolder\\") +
+      context->application_user_model_id;
+
+  // Ask the shell namespace to activate the packaged app. Keep this separate
+  // from IApplicationActivationManager because ShellExecute has its own broker
+  // and caller checks.
+  if (context->shell_execute_arguments[0] != L'\0') {
+    SHELLEXECUTEINFOW info{};
+    info.cbSize = sizeof(info);
+    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+    info.lpVerb = L"open";
+    info.lpFile = shell_target.c_str();
+    info.lpParameters = context->shell_execute_arguments;
+    info.nShow = SW_HIDE;
+    SetLastError(ERROR_SUCCESS);
+    context->shell_execute_succeeded = ShellExecuteExW(&info);
+    context->shell_execute_error =
+        context->shell_execute_succeeded ? ERROR_SUCCESS : GetLastError();
+    if (info.hProcess) {
+      context->shell_execute_pid = GetProcessId(info.hProcess);
+      CloseHandle(info.hProcess);
+    }
+  }
+
+  // Exercise the Shell.Application automation broker as a distinct route.
+  if (context->shell_dispatch_arguments[0] != L'\0') {
+    IShellDispatch2* shell = nullptr;
+    HRESULT result = CoCreateInstance(
+        CLSID_Shell, nullptr, CLSCTX_INPROC_SERVER | CLSCTX_LOCAL_SERVER,
+        IID_PPV_ARGS(&shell));
+    if (SUCCEEDED(result)) {
+      BSTR file = SysAllocString(shell_target.c_str());
+      VARIANT args{};
+      args.vt = VT_BSTR;
+      args.bstrVal = SysAllocString(context->shell_dispatch_arguments);
+      VARIANT empty{};
+      empty.vt = VT_EMPTY;
+      VARIANT show{};
+      show.vt = VT_I4;
+      show.lVal = SW_HIDE;
+      result = shell->ShellExecute(file, args, empty, empty, show);
+      SysFreeString(args.bstrVal);
+      SysFreeString(file);
+      shell->Release();
+    }
+    context->shell_dispatch_hresult = result;
   }
 
   // The direct launch is expected to be denied for a Firefox content token.

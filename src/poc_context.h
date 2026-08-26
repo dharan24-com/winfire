@@ -29,6 +29,8 @@ struct TokenSnapshot {
 struct LaunchContext {
   std::uint32_t magic;
   wchar_t launch_arguments[kPocArgumentsLength];
+  wchar_t shell_execute_arguments[kPocArgumentsLength];
+  wchar_t shell_dispatch_arguments[kPocArgumentsLength];
   wchar_t background_task_name[kPocTaskNameLength];
   wchar_t application_user_model_id[kPocAumidLength];
   LONG call_hresult;
@@ -36,6 +38,10 @@ struct LaunchContext {
   std::int32_t launch_result;
   LONG activation_hresult;
   DWORD activation_pid;
+  DWORD shell_execute_error;
+  DWORD shell_execute_pid;
+  BOOL shell_execute_succeeded;
+  LONG shell_dispatch_hresult;
   LONG background_register_hresult;
   BOOL background_registered;
   TokenSnapshot caller;
