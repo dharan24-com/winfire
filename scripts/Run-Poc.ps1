@@ -300,6 +300,7 @@ exit /b %errorlevel%
         "inject",
         "--pid", $ContentProcess.ProcessId.ToString(),
         "--dll", $LoadablePayload,
+        "--local-dll", $Payload,
         "--expected-family", $InstalledPackage.PackageFamilyName,
         "--launch-args", $EscapedArguments
     ) -EvidenceName "injection.json"

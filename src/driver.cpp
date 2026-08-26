@@ -393,6 +393,7 @@ std::uintptr_t InjectLibrary(HANDLE process, DWORD pid,
 }
 
 LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
+                             const std::wstring& local_dll_path,
                              const std::wstring& launch_arguments) {
   const DWORD access = PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
                        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_OPERATION |
@@ -404,7 +405,8 @@ LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
 
   const auto remote_module = InjectLibrary(process.get(), pid, dll_path);
   ScopedModule local_module(
-      LoadLibraryExW(dll_path.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES));
+      LoadLibraryExW(local_dll_path.c_str(), nullptr,
+                     DONT_RESOLVE_DLL_REFERENCES));
   if (!local_module.get()) {
     ThrowWindowsError("LoadLibraryExW(payload)");
   }
@@ -602,7 +604,7 @@ int wmain(int argc, wchar_t** argv) {
         ThrowWindowsError("GetFullPathNameW");
       }
       const auto context = RunInjectedPoc(
-          pid, full_dll_path,
+          pid, full_dll_path, RequireOption(argc, argv, L"--local-dll"),
           RequireOption(argc, argv, L"--launch-args"));
 
       std::cout << "{\"target_before\":";
