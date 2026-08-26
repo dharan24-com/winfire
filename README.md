@@ -6,6 +6,18 @@ Autoland batched that commit in pushlog `276768`. Taskcluster indexed the Window
 
 The report's unresolved question is whether native code already executing in a sandboxed Firefox content process can directly invoke `Windows.ApplicationModel.FullTrustProcessLauncher`. The harness tests that question on a GitHub-hosted Windows Server 2025 runner.
 
+## Observed result
+
+The completed [Windows proof run](https://github.com/dharan24-com/winfire/actions/runs/32958506804) returned **`BLOCKED_BY_WINDOWS`**. Its [evidence artifact](https://github.com/dharan24-com/winfire/actions/runs/32958506804/artifacts/9602956065) records all of the following:
+
+- The tested content process retained package family `Mozilla.MozillaFirefoxNightly_5x4grbbqzn2q4`.
+- The caller was a real `firefox.exe -contentproc -isForBrowser` process with a restricted, non-elevated, untrusted-integrity token (`integrity_rid: 0`).
+- The same token and package identity were captured again from inside the injected payload immediately before the WinRT call.
+- `LaunchFullTrustProcessForCurrentAppWithArgumentsAsync` failed with `0x80070005 (E_ACCESSDENIED)`.
+- No process carrying the controlled profile argument was created, and no full-trust token transition occurred.
+
+Therefore this run does **not** confirm the reported sandbox escape. It demonstrates that Windows denied the decisive direct-WinRT step on Windows Server 2025 24H2 (build 26100) for the autoland package under test. As with any single dynamic environment, this is scoped evidence rather than a claim about every supported Windows client configuration.
+
 ## What the proof does
 
 1. Downloads Mozilla Taskcluster's `repackage-msix-win64/opt` artifact from the autoland push containing the introducing commit and verifies its chain-of-trust SHA-256.
