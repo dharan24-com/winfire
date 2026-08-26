@@ -21,6 +21,7 @@ $InputMsix = Join-Path $WorkRoot "firefox-276bad1-unsigned.msix"
 $SignedMsix = Join-Path $WorkRoot "firefox-276bad1-test-signed.msix"
 $Driver = Join-Path $BuildRoot "poc_driver.exe"
 $Payload = Join-Path $BuildRoot "renderer_payload.dll"
+$Launcher = Join-Path $BuildRoot "firefox.exe"
 $LoadablePayload = $null
 $VerdictPath = Join-Path $ArtifactRoot "verdict.json"
 $SummaryPath = Join-Path $ArtifactRoot "summary.md"
@@ -103,7 +104,7 @@ function Invoke-DriverJson {
 }
 
 function Get-FirefoxProcesses {
-    return @(Get-CimInstance Win32_Process -Filter "Name = 'firefox.exe'" -ErrorAction SilentlyContinue)
+    return @(Get-CimInstance Win32_Process -Filter "Name = 'firefox.exe' OR Name = 'firefox-real.exe'" -ErrorAction SilentlyContinue)
 }
 
 function Wait-FirefoxContentProcess {
@@ -218,14 +219,16 @@ call "$VcVars" >nul
 cl.exe /nologo /W4 /EHsc /std:c++20 /MT /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /I"$SourceRoot" /LD "$SourceRoot\payload.cpp" /link /OUT:"$Payload" windowsapp.lib runtimeobject.lib ole32.lib oleaut32.lib shell32.lib advapi32.lib uuid.lib
 if errorlevel 1 exit /b %errorlevel%
 cl.exe /nologo /W4 /EHsc /std:c++20 /MT /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /I"$SourceRoot" "$SourceRoot\driver.cpp" /link /OUT:"$Driver" ole32.lib advapi32.lib uuid.lib
+if errorlevel 1 exit /b %errorlevel%
+cl.exe /nologo /W4 /EHsc /std:c++20 /MT /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /I"$SourceRoot" "$SourceRoot\launcher.cpp" /link /OUT:"$Launcher"
 exit /b %errorlevel%
 "@ | Set-Content -LiteralPath $BuildScript -Encoding ascii
     @(& cmd.exe /d /c $BuildScript 2>&1) | Tee-Object -FilePath (Join-Path $ArtifactRoot "build.log") | Write-Host
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $Driver) -or -not (Test-Path $Payload)) {
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $Driver) -or -not (Test-Path $Payload) -or -not (Test-Path $Launcher)) {
         throw "The native PoC harness failed to compile."
     }
     New-Item -ItemType Directory -Path (Join-Path $ArtifactRoot "binaries") -Force | Out-Null
-    Copy-Item $Driver, $Payload -Destination (Join-Path $ArtifactRoot "binaries")
+    Copy-Item $Driver, $Payload, $Launcher -Destination (Join-Path $ArtifactRoot "binaries")
 
     Invoke-WebRequest -Uri $MsixUrl -OutFile $InputMsix
     $ActualHash = (Get-FileHash -LiteralPath $InputMsix -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -279,6 +282,11 @@ exit /b %errorlevel%
     $PackagedPayloadRelativePath = Join-Path ([IO.Path]::GetDirectoryName($ApplicationExecutable)) "renderer_payload.dll"
     $PackagedPayloadSource = Join-Path $UnpackedRoot $PackagedPayloadRelativePath
     Copy-Item $Payload $PackagedPayloadSource
+    $PackagedFirefox = Join-Path $UnpackedRoot $ApplicationExecutable
+    $RealFirefoxRelativePath = Join-Path ([IO.Path]::GetDirectoryName($ApplicationExecutable)) "firefox-real.exe"
+    $RealFirefox = Join-Path $UnpackedRoot $RealFirefoxRelativePath
+    Move-Item -LiteralPath $PackagedFirefox -Destination $RealFirefox
+    Copy-Item -LiteralPath $Launcher -Destination $PackagedFirefox
     @(& $MakeAppx pack /d $UnpackedRoot /p $SignedMsix /o /nv 2>&1) | Set-Content -LiteralPath (Join-Path $ArtifactRoot "makeappx-pack.log") -Encoding utf8NoBOM
     if ($LASTEXITCODE -ne 0) {
         throw "MakeAppx failed to create the runner-local test package."
@@ -312,6 +320,8 @@ exit /b %errorlevel%
         aumid = "$($InstalledPackage.PackageFamilyName)!$ApplicationId"
         original_msix_sha256 = $ActualHash
         test_payload_relative_path = $PackagedPayloadRelativePath
+        instrumented_real_executable = $RealFirefoxRelativePath
+        preload_launcher_sha256 = (Get-FileHash -LiteralPath $Launcher -Algorithm SHA256).Hash.ToLowerInvariant()
         test_payload_sha256 = (Get-FileHash -LiteralPath $Payload -Algorithm SHA256).Hash.ToLowerInvariant()
         test_signed_msix_sha256 = (Get-FileHash -LiteralPath $SignedMsix -Algorithm SHA256).Hash.ToLowerInvariant()
     }

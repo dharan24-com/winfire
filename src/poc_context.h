@@ -10,6 +10,7 @@ constexpr wchar_t kPocContextMappingName[] =
     L"Local\\winfire-firefox-msix-poc-context";
 constexpr LONG kPocContextReady = 1;
 constexpr LONG kPocContextComplete = 2;
+constexpr LONG kPocContextRunning = 3;
 constexpr std::size_t kPocArgumentsLength = 2048;
 constexpr std::size_t kPocTaskNameLength = 512;
 constexpr std::size_t kPocAumidLength = 512;
@@ -34,6 +35,7 @@ struct LaunchContext {
   std::uint32_t magic;
   volatile LONG state;
   DWORD bootstrap_result;
+  DWORD target_pid;
   wchar_t launch_arguments[kPocArgumentsLength];
   wchar_t shell_execute_arguments[kPocArgumentsLength];
   wchar_t shell_dispatch_arguments[kPocArgumentsLength];

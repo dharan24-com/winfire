@@ -12,6 +12,7 @@
 #include <winrt/base.h>
 
 #include <algorithm>
+#include <cwctype>
 #include <iterator>
 #include <string>
 #include <vector>
@@ -152,7 +153,8 @@ void ProbeFirefoxProcessAccess(LaunchContext& context) {
     do {
       if (entry.th32ProcessID == GetCurrentProcessId() ||
           entry.th32ProcessID == context.parent_pid ||
-          _wcsicmp(entry.szExeFile, L"firefox.exe") != 0) {
+          (_wcsicmp(entry.szExeFile, L"firefox.exe") != 0 &&
+           _wcsicmp(entry.szExeFile, L"firefox-real.exe") != 0)) {
         continue;
       }
       SetLastError(ERROR_SUCCESS);
@@ -172,12 +174,28 @@ void ProbeFirefoxProcessAccess(LaunchContext& context) {
 }
 
 DWORD WINAPI RunMappedPoc(void*) {
-  HANDLE mapping = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE,
-                                    kPocContextMappingName);
-  if (!mapping) {
-    return GetLastError();
+  // The DLL is loaded while Firefox initializes its allocator. Let that
+  // initialization return before this worker performs any C++ allocations.
+  Sleep(2000);
+  std::wstring command_line = GetCommandLineW();
+  std::transform(command_line.begin(), command_line.end(),
+                 command_line.begin(),
+                 [](wchar_t value) { return std::towlower(value); });
+  if (command_line.find(L"-contentproc") == std::wstring::npos) {
+    return ERROR_SUCCESS;
   }
 
+  HANDLE mapping = nullptr;
+  for (int attempt = 0; attempt < 3600 && !mapping; ++attempt) {
+    mapping = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE,
+                               kPocContextMappingName);
+    if (!mapping) {
+      Sleep(50);
+    }
+  }
+  if (!mapping) {
+    return ERROR_TIMEOUT;
+  }
   auto* context = static_cast<LaunchContext*>(MapViewOfFile(
       mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(LaunchContext)));
   if (!context) {
@@ -188,13 +206,14 @@ DWORD WINAPI RunMappedPoc(void*) {
 
   DWORD result = ERROR_INVALID_DATA;
   if (context->magic == kPocContextMagic &&
-      InterlockedCompareExchange(&context->state, kPocContextReady,
+      context->target_pid == GetCurrentProcessId() &&
+      InterlockedCompareExchange(&context->state, kPocContextRunning,
                                  kPocContextReady) == kPocContextReady) {
     result = RunPoc(context);
+    context->bootstrap_result = result;
+    MemoryBarrier();
+    InterlockedExchange(&context->state, kPocContextComplete);
   }
-  context->bootstrap_result = result;
-  MemoryBarrier();
-  InterlockedExchange(&context->state, kPocContextComplete);
   UnmapViewOfFile(context);
   CloseHandle(mapping);
   return result;
@@ -410,6 +429,11 @@ extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context) {
   }
   return ERROR_SUCCESS;
 }
+
+// Firefox's supported replace-malloc loader resolves this export after it
+// loads the test DLL. Leaving the allocator table untouched makes the DLL a
+// benign preload whose only work is the sandbox-boundary probe above.
+extern "C" __declspec(dllexport) void replace_init(void*, void**) {}
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void*) {
   if (reason == DLL_PROCESS_ATTACH) {
