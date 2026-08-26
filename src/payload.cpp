@@ -39,6 +39,8 @@ const CLSID kNotificationActivationClsid = {
     0x4d36,
     {0xb0, 0x47, 0x03, 0xc7, 0xa5, 0x2f, 0x81, 0xc8}};
 
+extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context);
+
 namespace {
 
 template <std::size_t N>
@@ -167,6 +169,35 @@ void ProbeFirefoxProcessAccess(LaunchContext& context) {
     } while (Process32NextW(snapshot, &entry));
   }
   CloseHandle(snapshot);
+}
+
+DWORD WINAPI RunMappedPoc(void*) {
+  HANDLE mapping = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE,
+                                    kPocContextMappingName);
+  if (!mapping) {
+    return GetLastError();
+  }
+
+  auto* context = static_cast<LaunchContext*>(MapViewOfFile(
+      mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(LaunchContext)));
+  if (!context) {
+    const DWORD error = GetLastError();
+    CloseHandle(mapping);
+    return error;
+  }
+
+  DWORD result = ERROR_INVALID_DATA;
+  if (context->magic == kPocContextMagic &&
+      InterlockedCompareExchange(&context->state, kPocContextReady,
+                                 kPocContextReady) == kPocContextReady) {
+    result = RunPoc(context);
+  }
+  context->bootstrap_result = result;
+  MemoryBarrier();
+  InterlockedExchange(&context->state, kPocContextComplete);
+  UnmapViewOfFile(context);
+  CloseHandle(mapping);
+  return result;
 }
 
 }  // namespace
@@ -383,6 +414,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context) {
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void*) {
   if (reason == DLL_PROCESS_ATTACH) {
     DisableThreadLibraryCalls(instance);
+    HANDLE worker = CreateThread(nullptr, 0, RunMappedPoc, nullptr, 0, nullptr);
+    if (worker) {
+      CloseHandle(worker);
+    }
   }
   return TRUE;
 }

