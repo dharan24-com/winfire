@@ -288,30 +288,97 @@ TokenSnapshot InspectProcess(DWORD pid, DWORD access) {
   return snapshot;
 }
 
+std::uintptr_t FindRemoteModuleByMemoryMap(
+    DWORD pid, const std::wstring& module_name) {
+  using GetMappedFileNameFunction = DWORD(WINAPI*)(HANDLE, LPVOID, LPWSTR,
+                                                   DWORD);
+  const auto get_mapped_file_name =
+      reinterpret_cast<GetMappedFileNameFunction>(GetProcAddress(
+          GetModuleHandleW(L"kernel32.dll"), "K32GetMappedFileNameW"));
+  if (!get_mapped_file_name) {
+    ThrowWindowsError("GetProcAddress(K32GetMappedFileNameW)");
+  }
+
+  ScopedHandle process(OpenProcess(PROCESS_QUERY_INFORMATION |
+                                       PROCESS_QUERY_LIMITED_INFORMATION |
+                                       PROCESS_VM_READ,
+                                   FALSE, pid));
+  if (!process) {
+    ThrowWindowsError("OpenProcess(module scan)");
+  }
+
+  std::uintptr_t address = 0;
+  std::uintptr_t last_allocation_base = 0;
+  while (true) {
+    MEMORY_BASIC_INFORMATION region{};
+    const SIZE_T queried = VirtualQueryEx(
+        process.get(), reinterpret_cast<LPCVOID>(address), &region,
+        sizeof(region));
+    if (!queried) {
+      if (GetLastError() == ERROR_INVALID_PARAMETER) {
+        return 0;
+      }
+      ThrowWindowsError("VirtualQueryEx(module scan)");
+    }
+
+    const auto allocation_base =
+        reinterpret_cast<std::uintptr_t>(region.AllocationBase);
+    if (region.State == MEM_COMMIT && region.Type == MEM_IMAGE &&
+        allocation_base != 0 && allocation_base != last_allocation_base) {
+      last_allocation_base = allocation_base;
+      wchar_t mapped_path[32768]{};
+      if (get_mapped_file_name(process.get(), region.AllocationBase,
+                               mapped_path,
+                               static_cast<DWORD>(std::size(mapped_path))) &&
+          _wcsicmp(BaseName(mapped_path).c_str(), module_name.c_str()) == 0) {
+        return allocation_base;
+      }
+    }
+
+    const auto base = reinterpret_cast<std::uintptr_t>(region.BaseAddress);
+    const auto next = base + region.RegionSize;
+    if (next <= address || next < base) {
+      return 0;
+    }
+    address = next;
+  }
+}
+
 std::uintptr_t FindRemoteModule(DWORD pid, const std::wstring& module_name) {
   for (int attempt = 0; attempt < 10; ++attempt) {
     ScopedHandle snapshot(
         CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid));
     if (!snapshot) {
-      if (GetLastError() == ERROR_BAD_LENGTH) {
+      const DWORD error = GetLastError();
+      if (error == ERROR_BAD_LENGTH) {
         continue;
       }
-      ThrowWindowsError("CreateToolhelp32Snapshot");
+      if (error == ERROR_PARTIAL_COPY) {
+        return FindRemoteModuleByMemoryMap(pid, module_name);
+      }
+      ThrowWindowsError("CreateToolhelp32Snapshot", error);
     }
 
     MODULEENTRY32W entry{};
     entry.dwSize = sizeof(entry);
     if (!Module32FirstW(snapshot.get(), &entry)) {
-      ThrowWindowsError("Module32FirstW");
+      const DWORD error = GetLastError();
+      if (error == ERROR_PARTIAL_COPY) {
+        return FindRemoteModuleByMemoryMap(pid, module_name);
+      }
+      if (error == ERROR_NO_MORE_FILES) {
+        return 0;
+      }
+      ThrowWindowsError("Module32FirstW", error);
     }
     do {
       if (_wcsicmp(entry.szModule, module_name.c_str()) == 0) {
         return reinterpret_cast<std::uintptr_t>(entry.modBaseAddr);
       }
     } while (Module32NextW(snapshot.get(), &entry));
-    return 0;
+    return FindRemoteModuleByMemoryMap(pid, module_name);
   }
-  ThrowWindowsError("CreateToolhelp32Snapshot", ERROR_BAD_LENGTH);
+  return FindRemoteModuleByMemoryMap(pid, module_name);
 }
 
 std::uintptr_t WaitForRemoteModule(DWORD pid,
