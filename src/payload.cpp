@@ -19,6 +19,25 @@
 #  undef ShellExecute
 #endif
 
+struct NotificationUserInputData {
+  LPCWSTR key;
+  LPCWSTR value;
+};
+
+MIDL_INTERFACE("53E31837-6600-4A81-9395-75CFFE746F94")
+INotificationActivationCallback : public IUnknown {
+ public:
+  virtual HRESULT STDMETHODCALLTYPE Activate(
+      LPCWSTR app_user_model_id, LPCWSTR invoked_arguments,
+      const NotificationUserInputData* data, ULONG count) = 0;
+};
+
+const CLSID kNotificationActivationClsid = {
+    0x916f9b5d,
+    0xb5b2,
+    0x4d36,
+    {0xb0, 0x47, 0x03, 0xc7, 0xa5, 0x2f, 0x81, 0xc8}};
+
 namespace {
 
 template <std::size_t N>
@@ -102,6 +121,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context) {
   context->shell_execute_pid = 0;
   context->shell_execute_succeeded = FALSE;
   context->shell_dispatch_hresult = E_PENDING;
+  context->notification_activation_hresult = E_PENDING;
   context->background_register_hresult = E_PENDING;
   context->background_registered = FALSE;
   CaptureCurrentProcess(context->caller);
@@ -144,6 +164,24 @@ extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context) {
       manager->Release();
     }
     context->activation_hresult = result;
+  }
+
+  // The package also registers Mozilla's toast-activation COM surrogate. Its
+  // callback accepts newline-delimited launch data and starts firefox.exe.
+  if (context->notification_profile[0] != L'\0') {
+    INotificationActivationCallback* callback = nullptr;
+    HRESULT result = CoCreateInstance(
+        kNotificationActivationClsid, nullptr, CLSCTX_LOCAL_SERVER,
+        IID_PPV_ARGS(&callback));
+    if (SUCCEEDED(result)) {
+      const std::wstring invoked_arguments =
+          std::wstring(L"program\nwinfire\nprofile\n") +
+          context->notification_profile;
+      result = callback->Activate(context->application_user_model_id,
+                                  invoked_arguments.c_str(), nullptr, 0);
+      callback->Release();
+    }
+    context->notification_activation_hresult = result;
   }
 
   const std::wstring shell_target =
