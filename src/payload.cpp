@@ -190,6 +190,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context) {
   context->app_exec_alias_succeeded = FALSE;
   context->shell_dispatch_hresult = E_PENDING;
   context->notification_activation_hresult = E_PENDING;
+  context->background_access_hresult = E_PENDING;
+  context->background_access_status = -1;
   context->background_register_hresult = E_PENDING;
   context->background_registered = FALSE;
   CaptureCurrentProcess(context->caller);
@@ -343,6 +345,19 @@ extern "C" __declspec(dllexport) DWORD WINAPI RunPoc(void* raw_context) {
   // timer, Windows will later activate Mozilla's declared AppContainer entry
   // point, which calls FullTrustProcessLauncher on the package's behalf.
   if (context->background_task_name[0] != L'\0') {
+    try {
+      using namespace winrt::Windows::ApplicationModel::Background;
+      const auto access_status =
+          BackgroundExecutionManager::RequestAccessAsync().get();
+      context->background_access_status =
+          static_cast<std::int32_t>(access_status);
+      context->background_access_hresult = S_OK;
+    } catch (const winrt::hresult_error& error) {
+      context->background_access_hresult = error.code().value;
+    } catch (...) {
+      context->background_access_hresult = E_FAIL;
+    }
+
     try {
       using namespace winrt::Windows::ApplicationModel::Background;
       BackgroundTaskBuilder builder;

@@ -435,6 +435,8 @@ LaunchContext RunInjectedPoc(DWORD pid, const std::wstring& dll_path,
   context.app_exec_alias_error = ERROR_IO_PENDING;
   context.shell_dispatch_hresult = E_PENDING;
   context.notification_activation_hresult = E_PENDING;
+  context.background_access_hresult = E_PENDING;
+  context.background_access_status = -1;
   context.background_register_hresult = E_PENDING;
   if (launch_arguments.size() >= std::size(context.launch_arguments)) {
     throw std::runtime_error("launch argument string is too long");
@@ -707,6 +709,12 @@ int wmain(int argc, wchar_t** argv) {
                 << (context.sibling_injection_access ? "true" : "false")
                 << ",\"sibling_injection_open_error\":"
                 << context.sibling_injection_open_error
+                << ",\"background_access_hresult\":"
+                << context.background_access_hresult
+                << ",\"background_access_hresult_hex\":\""
+                << HexHresult(context.background_access_hresult)
+                << "\",\"background_access_status\":"
+                << context.background_access_status
                 << ",\"background_task_name\":\""
                 << JsonEscape(context.background_task_name)
                 << "\",\"background_registered\":"

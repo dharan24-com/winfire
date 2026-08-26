@@ -61,6 +61,8 @@ $Verdict = [ordered]@{
     sibling_injection_access = $false
     sibling_injection_pid = 0
     sibling_injection_open_error = $null
+    background_access_hresult = $null
+    background_access_status = $null
     background_task_registered = $false
     background_task_registration_hresult = $null
     background_proxy_process_observed = $false
@@ -172,6 +174,8 @@ function Write-Summary {
         "- Renderer obtained sibling injection access: ``$($Result.sibling_injection_access)``",
         "- Sibling injection PID: ``$($Result.sibling_injection_pid)``",
         "- Sibling OpenProcess error: ``$($Result.sibling_injection_open_error)``",
+        "- Background access request HRESULT: ``$($Result.background_access_hresult)``",
+        "- Background access status: ``$($Result.background_access_status)``",
         "- Renderer registered package timer: ``$($Result.background_task_registered)``",
         "- Background registration HRESULT: ``$($Result.background_task_registration_hresult)``",
         "- Background-task proxy process observed: ``$($Result.background_proxy_process_observed)``"
@@ -397,6 +401,8 @@ exit /b %errorlevel%
     $Verdict.sibling_injection_access = [bool]$Injection.sibling_injection_access
     $Verdict.sibling_injection_pid = $Injection.sibling_injection_pid
     $Verdict.sibling_injection_open_error = $Injection.sibling_injection_open_error
+    $Verdict.background_access_hresult = $Injection.background_access_hresult_hex
+    $Verdict.background_access_status = $Injection.background_access_status
     $Verdict.background_task_registered = [bool]$Injection.background_registered
     $Verdict.background_task_registration_hresult = $Injection.background_register_hresult_hex
     $LaunchedProcess = $null

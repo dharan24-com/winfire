@@ -54,6 +54,8 @@ struct LaunchContext {
   DWORD sibling_injection_pid;
   DWORD sibling_injection_open_error;
   BOOL sibling_injection_access;
+  LONG background_access_hresult;
+  std::int32_t background_access_status;
   LONG background_register_hresult;
   BOOL background_registered;
   TokenSnapshot caller;
